@@ -1,0 +1,57 @@
+[project]
+name = "rcwx"
+version = "0.1.0"
+description = "RVC Real-time Voice Changer on Intel Arc (XPU)"
+readme = "ONBOARD.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "torch>=2.7",
+    "torchaudio>=2.7",
+    "sounddevice>=0.4.6",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "customtkinter>=5.2",
+    "huggingface-hub>=0.20",
+    "transformers>=4.36",
+    "faiss-cpu>=1.7.4",
+    "denoiser>=0.1",  # Facebook's ML noise suppression (PyTorch-based)
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+rcwx = "rcwx.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+# Resolve only for Windows (XPU Triton is Linux-only)
+environments = ["sys_platform == 'win32'"]
+
+# Exclude triton-xpu from resolution (Windows doesn't need it)
+override-dependencies = [
+    "triton-xpu; sys_platform == 'linux'",
+    "pytorch-triton-xpu; sys_platform == 'linux'",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-xpu" }
+torchaudio = { index = "pytorch-xpu" }
+
+[[tool.uv.index]]
+name = "pytorch-xpu"
+url = "https://download.pytorch.org/whl/xpu"
+explicit = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]

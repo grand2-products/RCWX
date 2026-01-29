@@ -1,0 +1,200 @@
+# RCWX 環境構築ガイド
+
+## 前提条件
+
+### ハードウェア
+- **GPU**: Intel Arc (A770, A750, B580, etc.)
+- **Resizable BAR**: BIOS/UEFIで有効化推奨
+
+### OS
+- Windows 10/11 (64-bit)
+
+### ドライバ
+- Intel Arc GPU ドライバ（最新版推奨）
+- https://www.intel.com/content/www/us/en/download/785597/intel-arc-iris-xe-graphics-windows.html
+
+---
+
+## Step 1: uv のインストール
+
+### PowerShell（管理者権限不要）
+```powershell
+irm https://astral.sh/uv/install.ps1 | iex
+```
+
+### または winget
+```powershell
+winget install astral-sh.uv
+```
+
+### 確認
+```powershell
+uv --version
+```
+
+---
+
+## Step 2: プロジェクトのクローン
+
+```powershell
+git clone https://github.com/your-org/rcwx.git
+cd rcwx
+```
+
+---
+
+## Step 3: Python 環境構築
+
+```powershell
+# Python 3.12 で仮想環境を作成
+uv venv --python 3.12
+
+# 仮想環境を有効化
+.venv\Scripts\activate
+```
+
+---
+
+## Step 4: 依存関係のインストール
+
+```powershell
+# PyTorch XPU版 + 依存関係
+uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/xpu
+uv pip install sounddevice numpy scipy
+
+# または pyproject.toml から一括インストール
+uv pip install -e .
+```
+
+---
+
+## Step 5: 動作確認
+
+### XPU が認識されているか確認
+```powershell
+python -c "import torch; print(f'XPU Available: {torch.xpu.is_available()}')"
+```
+
+**期待される出力:**
+```
+XPU Available: True
+```
+
+### GPU 情報の確認
+```powershell
+python -c "import torch; print(torch.xpu.get_device_name(0))"
+```
+
+**出力例:**
+```
+Intel(R) Arc(TM) A770 Graphics
+```
+
+### 簡単な演算テスト
+```powershell
+python -c "import torch; x = torch.randn(1000, 1000, device='xpu'); print(f'Tensor on XPU: {x.device}')"
+```
+
+---
+
+## Step 6: torch.compile の確認（オプション）
+
+```powershell
+python -c "
+import torch
+
+@torch.compile
+def test_fn(x):
+    return x * 2 + 1
+
+x = torch.randn(100, device='xpu')
+y = test_fn(x)
+print(f'torch.compile OK: {y.device}')
+"
+```
+
+初回実行時はコンパイルに時間がかかります（数十秒〜数分）。
+
+---
+
+## トラブルシューティング
+
+### `torch.xpu.is_available()` が False
+
+1. **ドライバ確認**
+   ```powershell
+   # デバイスマネージャーでIntel Arcが認識されているか確認
+   Get-PnpDevice | Where-Object { $_.FriendlyName -like "*Arc*" }
+   ```
+
+2. **PyTorch再インストール**
+   ```powershell
+   uv pip uninstall torch torchvision torchaudio
+   uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/xpu
+   ```
+
+3. **Python バージョン確認**
+   ```powershell
+   python --version  # 3.11 または 3.12 であること
+   ```
+
+### CUDA関連エラーが出る
+
+PyTorch XPU版では `cuda` ではなく `xpu` を使用します。
+```python
+# NG
+tensor.to("cuda")
+
+# OK
+tensor.to("xpu")
+```
+
+### メモリ不足エラー
+
+```python
+# GPUメモリ使用量を確認
+print(torch.xpu.memory_allocated() / 1024**3, "GB")
+
+# キャッシュクリア
+torch.xpu.empty_cache()
+```
+
+### torch.compile が遅い・エラー
+
+- 初回はコンパイル時間がかかる（キャッシュされる）
+- エラー時は `torch.compile` を無効化して動作確認
+  ```python
+  # torch.compile を使わない場合
+  model = model  # torch.compile(model) の代わりに
+  ```
+
+---
+
+## 開発環境（オプション）
+
+### 開発用依存関係
+```powershell
+uv pip install -e ".[dev]"
+```
+
+### Ruff（リンター）
+```powershell
+ruff check .
+ruff format .
+```
+
+### テスト
+```powershell
+pytest
+```
+
+---
+
+## 次のステップ
+
+環境構築が完了したら、[ONBOARD.md](../ONBOARD.md) の「Phase 2: モデル移植」に進んでください。
+
+必要なモデルファイル:
+- `hubert_base.pt` - [HuggingFace](https://huggingface.co/lj1995/VoiceConversionWebUI)
+- `rmvpe.pt` - 同上
+- RVCv2モデル (`.pth`)

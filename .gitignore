@@ -1,0 +1,15 @@
+# Model data
+model/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Virtual environment
+.venv/
+
+# Build
+dist/
+build/
