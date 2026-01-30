@@ -190,6 +190,9 @@ class SynthesizerLoader:
         # Update speaker embedding dimension
         model_config["spk_embed_dim"] = speaker_embed_dim
 
+        # Set is_half based on dtype for NSF source module
+        model_config["is_half"] = self.dtype == torch.float16
+
         # Get sample rate from config or default
         sr = checkpoint.get("sr", 40000)
         # Handle string sample rates like "40k", "48k"

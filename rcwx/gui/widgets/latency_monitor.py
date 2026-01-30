@@ -24,6 +24,8 @@ class LatencyMonitor(ctk.CTkFrame):
         self._device_name: str = "未検出"
         self._latency_ms: float = 0.0
         self._cpu_percent: float = 0.0
+        self._index_loaded: bool = False
+        self._index_rate: float = 0.0
 
         self._setup_ui()
 
@@ -65,6 +67,19 @@ class LatencyMonitor(ctk.CTkFrame):
         self.sep3 = ctk.CTkLabel(self, text="|", font=ctk.CTkFont(size=11))
         self.sep3.grid(row=0, column=5, padx=5, pady=5)
 
+        # Index status label
+        self.index_label = ctk.CTkLabel(
+            self,
+            text="Index: --",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+        )
+        self.index_label.grid(row=0, column=6, padx=10, pady=5)
+
+        # Separator
+        self.sep4 = ctk.CTkLabel(self, text="|", font=ctk.CTkFont(size=11))
+        self.sep4.grid(row=0, column=7, padx=5, pady=5)
+
         # Status indicator
         self.status_indicator = ctk.CTkLabel(
             self,
@@ -72,10 +87,10 @@ class LatencyMonitor(ctk.CTkFrame):
             font=ctk.CTkFont(size=14),
             text_color="gray",
         )
-        self.status_indicator.grid(row=0, column=6, padx=10, pady=5, sticky="e")
+        self.status_indicator.grid(row=0, column=8, padx=10, pady=5, sticky="e")
 
         # Configure grid
-        self.grid_columnconfigure(6, weight=1)
+        self.grid_columnconfigure(8, weight=1)
 
     def set_device(self, name: str) -> None:
         """Set the device name."""
@@ -113,3 +128,29 @@ class LatencyMonitor(ctk.CTkFrame):
         self.status_indicator.configure(text="◐", text_color="#ffff00")
         self.latency_label.configure(text="レイテンシ: 読込中...")
         self.inference_label.configure(text="推論: --ms")
+
+    def set_index_status(self, loaded: bool, index_rate: float = 0.0) -> None:
+        """Set the index status.
+
+        Args:
+            loaded: Whether FAISS index is loaded
+            index_rate: Current index_rate setting (0-1)
+        """
+        self._index_loaded = loaded
+        self._index_rate = index_rate
+
+        if not loaded:
+            self.index_label.configure(text="Index: なし", text_color="gray")
+        elif index_rate <= 0:
+            self.index_label.configure(text="Index: OFF", text_color="gray")
+        else:
+            # Show index rate and indicate it's active
+            color = "#00ff00" if index_rate > 0.5 else "#ffff00"
+            self.index_label.configure(
+                text=f"Index: {index_rate:.0%}",
+                text_color=color,
+            )
+
+    def update_index_rate(self, index_rate: float) -> None:
+        """Update just the index rate (keeps loaded status)."""
+        self.set_index_status(self._index_loaded, index_rate)

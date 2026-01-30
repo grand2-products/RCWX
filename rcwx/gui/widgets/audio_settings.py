@@ -90,33 +90,14 @@ class AudioSettingsFrame(ctk.CTkFrame):
         )
         self.output_dropdown.grid(row=3, column=0, padx=10, pady=5, sticky="ew")
 
-        # Chunk size section
-        self.chunk_label = ctk.CTkLabel(
-            self,
-            text="チャンクサイズ",
-            font=ctk.CTkFont(size=12, weight="bold"),
-        )
-        self.chunk_label.grid(row=4, column=0, sticky="w", padx=10, pady=(15, 5))
-
-        self.chunk_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.chunk_frame.grid(row=5, column=0, padx=10, pady=5, sticky="ew")
-
-        self.chunk_var = ctk.StringVar(value="350ms (バランス)")
+        # Note: Chunk size is now managed by LatencySettingsFrame
+        # Keep chunk_sec and chunk_options for backwards compatibility
+        self.chunk_sec: float = 0.35
         self.chunk_options = [
             ("200ms (低遅延/F0なし)", 0.2),
             ("350ms (バランス)", 0.35),
             ("500ms (高品質)", 0.5),
         ]
-
-        for i, (label, value) in enumerate(self.chunk_options):
-            rb = ctk.CTkRadioButton(
-                self.chunk_frame,
-                text=label,
-                variable=self.chunk_var,
-                value=label,
-                command=self._on_chunk_change,
-            )
-            rb.grid(row=0, column=i, padx=5, pady=5)
 
         # Input level meter section
         self.level_label = ctk.CTkLabel(
@@ -124,10 +105,10 @@ class AudioSettingsFrame(ctk.CTkFrame):
             text="入力レベル",
             font=ctk.CTkFont(size=12, weight="bold"),
         )
-        self.level_label.grid(row=6, column=0, sticky="w", padx=10, pady=(15, 5))
+        self.level_label.grid(row=4, column=0, sticky="w", padx=10, pady=(15, 5))
 
         self.level_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.level_frame.grid(row=7, column=0, padx=10, pady=5, sticky="ew")
+        self.level_frame.grid(row=5, column=0, padx=10, pady=5, sticky="ew")
         self.level_frame.grid_columnconfigure(0, weight=1)
 
         self.level_bar = ctk.CTkProgressBar(self.level_frame, width=280, height=20)
@@ -143,7 +124,7 @@ class AudioSettingsFrame(ctk.CTkFrame):
             width=120,
             command=self._toggle_monitor,
         )
-        self.monitor_btn.grid(row=8, column=0, padx=10, pady=(5, 10), sticky="w")
+        self.monitor_btn.grid(row=6, column=0, padx=10, pady=(5, 10), sticky="w")
 
         # Input gain section
         self.gain_label = ctk.CTkLabel(
@@ -151,10 +132,10 @@ class AudioSettingsFrame(ctk.CTkFrame):
             text="入力ゲイン補正",
             font=ctk.CTkFont(size=12, weight="bold"),
         )
-        self.gain_label.grid(row=9, column=0, sticky="w", padx=10, pady=(15, 5))
+        self.gain_label.grid(row=7, column=0, sticky="w", padx=10, pady=(15, 5))
 
         self.gain_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.gain_frame.grid(row=10, column=0, padx=10, pady=5, sticky="ew")
+        self.gain_frame.grid(row=8, column=0, padx=10, pady=5, sticky="ew")
 
         self.gain_slider = ctk.CTkSlider(
             self.gain_frame,
@@ -172,7 +153,7 @@ class AudioSettingsFrame(ctk.CTkFrame):
 
         # Recommended gain display
         self.recommended_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.recommended_frame.grid(row=11, column=0, padx=10, pady=5, sticky="ew")
+        self.recommended_frame.grid(row=9, column=0, padx=10, pady=5, sticky="ew")
 
         self.recommended_label = ctk.CTkLabel(
             self.recommended_frame,
@@ -262,17 +243,6 @@ class AudioSettingsFrame(ctk.CTkFrame):
                     self.output_device = device["index"]
                     self.output_sample_rate = int(device["sample_rate"])
                     break
-
-        if self.on_settings_changed:
-            self.on_settings_changed()
-
-    def _on_chunk_change(self) -> None:
-        """Handle chunk size change."""
-        value = self.chunk_var.get()
-        for label, sec in self.chunk_options:
-            if label == value:
-                self.chunk_sec = sec
-                break
 
         if self.on_settings_changed:
             self.on_settings_changed()

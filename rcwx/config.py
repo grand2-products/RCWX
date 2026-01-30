@@ -23,6 +23,9 @@ class AudioConfig:
     chunk_sec: float = 0.35  # RMVPE requires >= 0.32 sec
     crossfade_sec: float = 0.05
     input_gain_db: float = 0.0  # Input gain in dB
+    # Latency settings
+    prebuffer_chunks: int = 1  # Chunks to buffer before output (0=lowest latency)
+    buffer_margin: float = 0.5  # Buffer margin multiplier (0.5=tight, 1.0=relaxed)
 
 
 @dataclass
@@ -42,9 +45,43 @@ class InferenceConfig:
 
     pitch_shift: int = 0  # semitones
     use_f0: bool = True
+    # F0 extraction method: "rmvpe" (accurate, 320ms min) or "fcpe" (fast, 100ms min)
+    f0_method: str = "rmvpe"
     use_index: bool = False
     index_ratio: float = 0.5
     use_compile: bool = True
+    # Voice gate mode: "off", "strict", "expand", "energy"
+    # - off: no voice gate (all audio passes through)
+    # - strict: F0-based only (original, may cut plosives)
+    # - expand: expand voiced regions to include plosives
+    # - energy: use energy + F0 (plosives with energy pass through)
+    voice_gate_mode: str = "expand"
+    # Energy threshold for "energy" mode (0.01-0.2, default 0.05)
+    # Lower = more sensitive (catches quieter sounds but may pass noise)
+    # Higher = less sensitive (better noise rejection but may cut soft sounds)
+    energy_threshold: float = 0.05
+    # Feature caching for chunk continuity (blends HuBERT/F0 at boundaries)
+    use_feature_cache: bool = True
+
+    # --- Low-latency processing ---
+    # Context: extra audio on left side for stable edge processing
+    # 0.05 = 50ms context (minimal for low latency)
+    context_sec: float = 0.05
+
+    # Lookahead: future samples (ADDS LATENCY!)
+    # 0 = no lookahead (lowest latency)
+    lookahead_sec: float = 0.0
+
+    # Extra discard: additional samples to remove beyond context
+    extra_sec: float = 0.0
+
+    # Crossfade length for SOLA blending (50ms is sufficient)
+    crossfade_sec: float = 0.05
+
+    # Enable SOLA (Synchronized Overlap-Add) for optimal crossfade position
+    # Uses RVC-style correlation-based phase alignment
+    use_sola: bool = True
+
     denoise: DenoiseConfig = field(default_factory=DenoiseConfig)
 
 
@@ -84,6 +121,15 @@ class RCWXConfig:
         # Handle nested denoise config
         denoise_data = inference_data.pop("denoise", {})
         denoise_config = DenoiseConfig(**denoise_data) if denoise_data else DenoiseConfig()
+
+        # Migrate old inference config keys to w-okada style
+        if "use_input_overlap" in inference_data:
+            inference_data.pop("use_input_overlap")
+        if "use_overlap_crossfade" in inference_data:
+            inference_data.pop("use_overlap_crossfade")
+        if "overlap_sec" in inference_data:
+            # Migrate overlap_sec to context_sec
+            inference_data["context_sec"] = inference_data.pop("overlap_sec")
 
         return cls(
             audio=AudioConfig(**audio_data),

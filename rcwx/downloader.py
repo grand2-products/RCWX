@@ -11,8 +11,9 @@ from huggingface_hub import hf_hub_download
 logger = logging.getLogger(__name__)
 
 # Model repository and file mappings
-HUBERT_REPO = "lengyue233/content-vec-best"
-HUBERT_FILE = "pytorch_model.bin"
+# Use RVC's hubert_base.pt for better compatibility
+HUBERT_REPO = "lj1995/VoiceConversionWebUI"
+HUBERT_FILE = "hubert_base.pt"
 
 RMVPE_REPO = "lj1995/VoiceConversionWebUI"
 RMVPE_FILE = "rmvpe.pt"

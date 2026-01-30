@@ -18,10 +18,17 @@ from rcwx.audio.resample import resample
 from rcwx.device import get_device, get_dtype
 from rcwx.downloader import get_hubert_path, get_rmvpe_path
 from rcwx.models.hubert import HuBERTFeatureExtractor
+from rcwx.models.hubert_loader import HuBERTLoader
 from rcwx.models.rmvpe import RMVPE
+from rcwx.models.fcpe import FCPE, is_fcpe_available
 from rcwx.models.synthesizer import SynthesizerLoader
 
 logger = logging.getLogger(__name__)
+
+# Minimum feature frames required by the synthesizer decoder
+# The decoder uses upsampling convolutions that require sufficient input length
+# 64 frames @ 100fps = 640ms worth of features
+MIN_SYNTH_FEATURE_FRAMES = 64
 
 
 def highpass_filter(audio: np.ndarray, sr: int = 16000, cutoff: int = 48) -> np.ndarray:
@@ -54,6 +61,7 @@ class RVCPipeline:
         use_f0: bool = True,
         use_compile: bool = True,
         models_dir: Optional[str] = None,
+        hubert_backend: str = "fairseq",
     ):
         """
         Initialize the RVC pipeline.
@@ -66,7 +74,9 @@ class RVCPipeline:
             use_f0: Whether to use F0 extraction (if model supports it)
             use_compile: Whether to use torch.compile optimization
             models_dir: Directory containing HuBERT and RMVPE models
+            hubert_backend: "fairseq" (RVC WebUI compatible) or "transformers"
         """
+        self.hubert_backend = hubert_backend
         self.model_path = Path(model_path)
 
         # Auto-detect index file if not provided
@@ -96,6 +106,7 @@ class RVCPipeline:
         # Components (initialized lazily)
         self.hubert: Optional[HuBERTFeatureExtractor] = None
         self.rmvpe: Optional[RMVPE] = None
+        self.fcpe: Optional[FCPE] = None
         self.synthesizer: Optional[SynthesizerLoader] = None
 
         # FAISS index components
@@ -106,6 +117,12 @@ class RVCPipeline:
         self.has_f0: bool = use_f0
         self.sample_rate: int = 40000
         self._loaded: bool = False
+
+        # Feature cache for chunk continuity
+        # Stores the last N frames of HuBERT features for blending with next chunk
+        self._cached_features: Optional[torch.Tensor] = None
+        self._cached_f0: Optional[torch.Tensor] = None
+        self._feature_cache_frames: int = 10  # Cache 10 frames (~100ms at 100fps)
 
     def load(self) -> None:
         """Load all models."""
@@ -129,18 +146,22 @@ class RVCPipeline:
 
         # Load HuBERT
         hubert_path = get_hubert_path(self.models_dir)
-        self.hubert = HuBERTFeatureExtractor(
+        logger.info(f"Loading HuBERT from: {hubert_path}")
+
+        # Use the new loader that handles both RVC and transformers formats
+        self.hubert = HuBERTLoader(
             str(hubert_path) if hubert_path.exists() else None,
             device=self.device,
             dtype=self.dtype,
         )
 
-        if self.use_compile:
+        if self.use_compile and hasattr(self.hubert, 'model'):
             logger.info("Compiling HuBERT model...")
             self.hubert.model = torch.compile(self.hubert.model, mode="reduce-overhead")
 
-        # Load RMVPE if F0 is used
+        # Load F0 models if F0 is used
         if self.has_f0:
+            # Load RMVPE
             rmvpe_path = get_rmvpe_path(self.models_dir)
             if rmvpe_path.exists():
                 self.rmvpe = RMVPE(
@@ -152,7 +173,25 @@ class RVCPipeline:
                     logger.info("Compiling RMVPE model...")
                     self.rmvpe.model = torch.compile(self.rmvpe.model, mode="reduce-overhead")
             else:
-                logger.warning("RMVPE model not found, F0 extraction disabled")
+                logger.warning("RMVPE model not found")
+
+            # Load FCPE if available (lightweight alternative)
+            if is_fcpe_available():
+                try:
+                    self.fcpe = FCPE(
+                        device=self.device,
+                        dtype=self.dtype,
+                    )
+                    logger.info("FCPE model loaded (low-latency F0 available)")
+                except Exception as e:
+                    logger.warning(f"Failed to load FCPE: {e}")
+                    self.fcpe = None
+            else:
+                logger.info("FCPE not available (install with: pip install torchfcpe)")
+
+            # Disable F0 if neither model is available
+            if self.rmvpe is None and self.fcpe is None:
+                logger.warning("No F0 model available, F0 extraction disabled")
                 self.has_f0 = False
 
         # Load FAISS index if available
@@ -240,16 +279,26 @@ class RVCPipeline:
         """Unload all models to free memory."""
         self.hubert = None
         self.rmvpe = None
+        self.fcpe = None
         self.synthesizer = None
         self.faiss_index = None
         self.index_features = None
         self._loaded = False
+        self.clear_cache()
 
         # Clear CUDA/XPU cache
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         if hasattr(torch, "xpu") and torch.xpu.is_available():
             torch.xpu.empty_cache()
+
+    def clear_cache(self) -> None:
+        """Clear feature cache for chunk continuity.
+
+        Call this when starting a new audio stream or after a long pause.
+        """
+        self._cached_features = None
+        self._cached_f0 = None
 
     @torch.no_grad()
     def infer(
@@ -259,9 +308,11 @@ class RVCPipeline:
         pitch_shift: int = 0,
         f0_method: str = "rmvpe",
         index_rate: float = 0.0,
-        voice_gate: bool = True,
+        voice_gate_mode: str = "expand",
+        energy_threshold: float = 0.05,
         denoise: bool = False,
         noise_reference: Optional[np.ndarray] = None,
+        use_feature_cache: bool = True,
     ) -> np.ndarray:
         """
         Convert voice using the RVC pipeline.
@@ -272,9 +323,15 @@ class RVCPipeline:
             pitch_shift: Pitch shift in semitones
             f0_method: F0 extraction method ("rmvpe" or "none")
             index_rate: FAISS index blending ratio (0=off, 0.5=balanced, 1=index only)
-            voice_gate: If True, mute unvoiced segments (reduces background noise)
+            voice_gate_mode: Voice gate mode for unvoiced segments:
+                - "off": no gating, all audio passes through
+                - "strict": F0-based only (may cut plosives like p/t/k)
+                - "expand": expand voiced regions to include adjacent plosives
+                - "energy": use energy + F0 (plosives with energy pass through)
+            energy_threshold: Energy threshold for "energy" mode (0.01-0.2, default 0.05)
             denoise: If True, apply spectral gate noise reduction before processing
             noise_reference: Optional noise sample for denoiser (auto-learns if None)
+            use_feature_cache: Enable feature caching for chunk continuity (default True)
 
         Returns:
             Converted audio at model sample rate (usually 40kHz)
@@ -314,13 +371,46 @@ class RVCPipeline:
         audio_np = audio.numpy()
         audio_np = highpass_filter(audio_np, sr=16000, cutoff=48)
 
-        # Add reflection padding (original RVC uses this for edge handling)
-        # Use 50ms padding which is 800 samples at 16kHz
-        x_pad = 0.05  # 50ms padding
-        t_pad = int(16000 * x_pad)  # Input padding samples
-        t_pad_tgt = int(self.sample_rate * x_pad)  # Output padding samples
+        # Add reflection padding for edge handling
+        # Base padding: 50ms (800 samples @ 16kHz)
+        # For short inputs, increase padding to ensure we get MIN_SYNTH_FEATURE_FRAMES
+        # without needing feature-level padding (which causes length mismatch issues)
         original_length = len(audio_np)
-        audio_np = np.pad(audio_np, (t_pad, t_pad), mode="reflect")
+        hubert_hop = 320
+
+        # Calculate minimum input samples needed for MIN_SYNTH_FEATURE_FRAMES features
+        # MIN_SYNTH_FEATURE_FRAMES is at 100fps, HuBERT produces 50fps, so /2
+        # HuBERT produces approximately (samples / hop) - 1 frames due to its internal handling,
+        # so we add 2 extra hops to ensure we get enough frames
+        min_hubert_frames = MIN_SYNTH_FEATURE_FRAMES // 2  # 32 frames
+        min_input_samples = (min_hubert_frames + 2) * hubert_hop  # 10880 samples (with buffer)
+
+        # Base padding (50ms each side = 1600 total)
+        base_pad = int(16000 * 0.05)  # 800 samples
+
+        # Check if we need extra padding to meet minimum
+        total_with_base = base_pad + original_length + base_pad
+        if total_with_base < min_input_samples:
+            # Need more padding - distribute evenly
+            extra_needed = min_input_samples - total_with_base
+            extra_per_side = (extra_needed + 1) // 2
+            t_pad = base_pad + extra_per_side
+            logger.info(f"Short input: increased padding from {base_pad} to {t_pad} samples per side")
+        else:
+            t_pad = base_pad
+
+        t_pad_tgt = int(t_pad * self.sample_rate / 16000)  # Output padding samples (proportional)
+
+        # Pad to multiple of HuBERT hop size (320) to avoid frame truncation
+        padded_for_hubert = t_pad + original_length + t_pad
+        remainder = padded_for_hubert % hubert_hop
+        if remainder != 0:
+            extra_pad = hubert_hop - remainder
+        else:
+            extra_pad = 0
+
+        audio_np = np.pad(audio_np, (t_pad, t_pad + extra_pad), mode="reflect")
+        logger.info(f"Padding: original={original_length}, t_pad={t_pad}, extra_pad={extra_pad}, final={len(audio_np)}")
 
         audio = torch.from_numpy(audio_np).float()
 
@@ -354,17 +444,35 @@ class RVCPipeline:
             features = self._search_index(features, index_rate)
             logger.info(f"Index retrieval applied: index_rate={index_rate}")
 
+        # Apply feature cache blending for chunk continuity
+        if use_feature_cache and self._cached_features is not None:
+            cache_frames = min(self._feature_cache_frames, features.shape[1], self._cached_features.shape[1])
+            if cache_frames > 0:
+                # Blend cached features with current features at the beginning
+                # Use linear crossfade: alpha goes from 1 (use cached) to 0 (use current)
+                alpha = torch.linspace(1, 0, cache_frames, device=features.device, dtype=features.dtype)
+                alpha = alpha.view(1, cache_frames, 1)  # [1, T, 1] for broadcasting
+                cached = self._cached_features[:, -cache_frames:, :]  # Last N frames of cache
+                current = features[:, :cache_frames, :]  # First N frames of current
+                blended = alpha * cached + (1 - alpha) * current
+                features = torch.cat([blended, features[:, cache_frames:, :]], dim=1)
+                logger.debug(f"Feature cache blended: {cache_frames} frames")
+
+        # Cache features for next chunk (before interpolation, at 50fps)
+        if use_feature_cache:
+            self._cached_features = features[:, -self._feature_cache_frames:, :].clone()
+
         # Interpolate features to match synthesizer expectation
-        # Original RVC: F.interpolate(feats.permute(0, 2, 1), scale_factor=2).permute(0, 2, 1)
-        # Uses 'nearest' mode (default) with 2x upscale
+        # RVC uses bilinear (linear) interpolation for 2x upscale
         # HuBERT hop=320 @ 16kHz (50fps) -> Synthesizer needs 100fps
         original_frames = features.shape[1]
         features = torch.nn.functional.interpolate(
             features.permute(0, 2, 1),  # [B, T, C] -> [B, C, T]
             scale_factor=2,  # Fixed 2x upscale (matches original RVC)
-            mode="nearest",  # Original RVC uses nearest (default mode)
+            mode="linear",  # RVC uses bilinear interpolation
+            align_corners=False,
         ).permute(0, 2, 1)  # [B, C, T] -> [B, T, C]
-        logger.info(f"Interpolated features: {original_frames} -> {features.shape[1]} frames (2x nearest)")
+        logger.info(f"Interpolated features: {original_frames} -> {features.shape[1]} frames (2x linear)")
 
         # Feature length
         feature_lengths = torch.tensor(
@@ -375,9 +483,21 @@ class RVCPipeline:
         pitch = None
         pitchf = None
         if self.has_f0:
-            if self.rmvpe is not None and f0_method == "rmvpe":
+            f0 = None
+
+            # Use FCPE if requested and available
+            if f0_method == "fcpe" and self.fcpe is not None:
+                with torch.autocast(device_type=self.device, dtype=self.dtype):
+                    f0 = self.fcpe.infer(audio, threshold=0.006)
+                logger.debug("F0 extracted with FCPE")
+
+            # Use RMVPE if requested and available (or fallback if FCPE failed)
+            elif self.rmvpe is not None and (f0_method == "rmvpe" or f0 is None):
                 with torch.autocast(device_type=self.device, dtype=self.dtype):
                     f0 = self.rmvpe.infer(audio)
+                logger.debug("F0 extracted with RMVPE")
+
+            if f0 is not None:
 
                 # Apply pitch shift (only to voiced regions where f0 > 0)
                 if pitch_shift != 0:
@@ -393,6 +513,30 @@ class RVCPipeline:
                         mode="linear",
                         align_corners=False,
                     ).squeeze(1)
+
+                # Apply F0 cache blending for chunk continuity
+                f0_cache_frames = self._feature_cache_frames * 2  # 2x because features were interpolated
+                if use_feature_cache and self._cached_f0 is not None:
+                    cache_frames = min(f0_cache_frames, f0.shape[1], self._cached_f0.shape[1])
+                    if cache_frames > 0:
+                        # Blend F0: smooth transition from cached to current
+                        alpha = torch.linspace(1, 0, cache_frames, device=f0.device, dtype=f0.dtype)
+                        alpha = alpha.view(1, cache_frames)
+                        cached_f0 = self._cached_f0[:, -cache_frames:]
+                        current_f0 = f0[:, :cache_frames]
+                        # Only blend where both have valid F0 (> 0), otherwise use current
+                        both_voiced = (cached_f0 > 0) & (current_f0 > 0)
+                        blended_f0 = torch.where(
+                            both_voiced,
+                            alpha * cached_f0 + (1 - alpha) * current_f0,
+                            current_f0  # Use current if either is unvoiced
+                        )
+                        f0 = torch.cat([blended_f0, f0[:, cache_frames:]], dim=1)
+                        logger.debug(f"F0 cache blended: {cache_frames} frames")
+
+                # Cache F0 for next chunk
+                if use_feature_cache:
+                    self._cached_f0 = f0[:, -f0_cache_frames:].clone()
 
                 # pitchf: continuous F0 values for NSF decoder
                 pitchf = f0.to(self.dtype)
@@ -425,13 +569,37 @@ class RVCPipeline:
                 # Store voiced mask for gating (will be used after synthesis)
                 voiced_mask_for_gate = voiced_mask.float()  # [B, T]
             else:
-                # F0 model but no RMVPE - use pitch=1 (unvoiced marker per RVC convention)
+                # No F0 model available - use pitch=1 (unvoiced marker per RVC convention)
                 pitch = torch.ones(features.shape[0], features.shape[1], dtype=torch.long, device=self.device)
                 pitchf = torch.zeros(features.shape[0], features.shape[1], dtype=self.dtype, device=self.device)
                 voiced_mask_for_gate = None
-                logger.info("F0: using unvoiced pitch=1 (no RMVPE)")
+                logger.info("F0: using unvoiced pitch=1 (no F0 model)")
         else:
             voiced_mask_for_gate = None
+
+        # Pad features if too short for synthesizer decoder
+        # The decoder's upsampling convolutions require minimum input length
+        synth_pad_frames = 0
+        if features.shape[1] < MIN_SYNTH_FEATURE_FRAMES:
+            synth_pad_frames = MIN_SYNTH_FEATURE_FRAMES - features.shape[1]
+            # Reflection pad to avoid edge artifacts
+            pad_left = synth_pad_frames // 2
+            pad_right = synth_pad_frames - pad_left
+            features = torch.nn.functional.pad(
+                features.permute(0, 2, 1),  # [B, T, C] -> [B, C, T]
+                (pad_left, pad_right),
+                mode="reflect",
+            ).permute(0, 2, 1)  # [B, C, T] -> [B, T, C]
+            # Update feature lengths
+            feature_lengths = torch.tensor(
+                [features.shape[1]], dtype=torch.long, device=self.device
+            )
+            # Pad pitch/pitchf if present
+            if pitch is not None:
+                pitch = torch.nn.functional.pad(pitch, (pad_left, pad_right), mode="reflect")
+            if pitchf is not None:
+                pitchf = torch.nn.functional.pad(pitchf, (pad_left, pad_right), mode="reflect")
+            logger.info(f"Padded short input: {features.shape[1] - synth_pad_frames} -> {features.shape[1]} frames (min={MIN_SYNTH_FEATURE_FRAMES})")
 
         # Run synthesizer
         logger.info(f"Synthesizer input: features={features.shape}, pitch={pitch.shape if pitch is not None else None}")
@@ -445,13 +613,60 @@ class RVCPipeline:
 
         logger.info(f"Synthesizer output: shape={output.shape}, min={output.min():.4f}, max={output.max():.4f}")
 
-        # Apply voice gating to mute unvoiced segments (reduces background noise)
-        if voice_gate and voiced_mask_for_gate is not None:
-            output_len = output.shape[-1]
+        # Trim synthesizer padding if we added it for short inputs
+        if synth_pad_frames > 0:
+            # Calculate output samples to trim based on feature-to-audio ratio
+            # Each feature frame = samples_per_frame samples at synthesizer sample rate
+            samples_per_frame = self.sample_rate // 100  # 100fps features -> samples/frame
+            trim_left = (synth_pad_frames // 2) * samples_per_frame
+            trim_right = (synth_pad_frames - synth_pad_frames // 2) * samples_per_frame
 
-            # Upsample voiced mask to match output length
+            # Debug: check synth output before trimming
+            synth_total = output.shape[-1]
+            synth_tail_rms = float(torch.sqrt(torch.mean(output[..., -trim_right-samples_per_frame:-trim_right]**2))) if trim_right > 0 else 0
+
+            if output.shape[-1] > trim_left + trim_right:
+                output = output[..., trim_left:-trim_right] if trim_right > 0 else output[..., trim_left:]
+                logger.info(f"Trimmed synth padding: {trim_left} + {trim_right} samples (synth_total={synth_total}, synth_tail_rms={synth_tail_rms:.4f})")
+
+        # Apply voice gating based on mode
+        if voice_gate_mode != "off" and voiced_mask_for_gate is not None:
+            output_len = output.shape[-1]
+            gate_mask = voiced_mask_for_gate.clone()  # [B, T_feat]
+
+            # Mode: expand - dilate voiced regions to include adjacent plosives
+            if voice_gate_mode == "expand":
+                # Expand by ~30ms on each side (covers most plosives)
+                # At feature rate (~50fps), that's about 1-2 frames
+                expand_frames = 2
+                # Use max pooling to dilate the mask
+                gate_mask = torch.nn.functional.max_pool1d(
+                    gate_mask.unsqueeze(1),
+                    kernel_size=expand_frames * 2 + 1,
+                    stride=1,
+                    padding=expand_frames,
+                ).squeeze(1)
+
+            # Mode: energy - combine F0 with energy-based detection
+            elif voice_gate_mode == "energy":
+                # Compute frame-level energy from output (already synthesized)
+                # Use short-time energy at feature frame rate
+                frame_size = output_len // gate_mask.shape[-1]
+                if frame_size > 0:
+                    output_frames = output.unfold(-1, frame_size, frame_size)  # [B, num_frames, frame_size]
+                    frame_energy = (output_frames ** 2).mean(dim=-1)  # [B, num_frames]
+                    # Normalize energy to 0-1
+                    energy_max = frame_energy.max(dim=-1, keepdim=True).values.clamp(min=1e-8)
+                    energy_mask = frame_energy / energy_max
+                    # Threshold: keep frames with energy above threshold
+                    energy_mask = (energy_mask > energy_threshold).float()
+                    # Combine: voiced OR has energy
+                    if energy_mask.shape[-1] == gate_mask.shape[-1]:
+                        gate_mask = torch.maximum(gate_mask, energy_mask)
+
+            # Upsample mask to match output length
             gate_mask = torch.nn.functional.interpolate(
-                voiced_mask_for_gate.unsqueeze(1),  # [B, 1, T_feat]
+                gate_mask.unsqueeze(1),  # [B, 1, T_feat]
                 size=output_len,
                 mode="linear",
                 align_corners=False,
@@ -474,7 +689,7 @@ class RVCPipeline:
             # Apply gate
             output = output * gate_mask
             voiced_ratio = gate_mask.mean().item()
-            logger.info(f"Voice gate applied: {voiced_ratio*100:.1f}% voiced")
+            logger.info(f"Voice gate ({voice_gate_mode}): {voiced_ratio*100:.1f}% passed")
 
         # Convert to numpy
         output = output.cpu().float().numpy()
@@ -483,21 +698,38 @@ class RVCPipeline:
             output = output[0]
 
         # Trim padding from output (match the input padding ratio)
-        # t_pad_tgt = output_sr * x_pad where x_pad = 0.05
-        t_pad_tgt = int(self.sample_rate * 0.05)
-        if len(output) > 2 * t_pad_tgt:
-            output = output[t_pad_tgt:-t_pad_tgt]
-            logger.info(f"Trimmed {t_pad_tgt} samples from each end")
+        # t_pad_tgt was calculated earlier based on actual t_pad used
+        # Also account for extra_pad added for HuBERT alignment
+        extra_pad_tgt = int(extra_pad * self.sample_rate / 16000)
+        trim_start = t_pad_tgt
+        trim_end = t_pad_tgt + extra_pad_tgt
 
-        # Verify output length
+        # Debug: check output before trimming
+        pre_trim_tail_rms = np.sqrt(np.mean(output[-trim_end-480:-trim_end]**2)) if trim_end > 0 and len(output) > trim_end + 480 else 0
+        post_trim_tail_start = -trim_end if trim_end > 0 else len(output)
+
+        if len(output) > trim_start + trim_end:
+            output = output[trim_start:-trim_end] if trim_end > 0 else output[trim_start:]
+            logger.info(f"Trimmed {trim_start} from start, {trim_end} from end (pre-trim tail rms={pre_trim_tail_rms:.4f})")
+
+        # Note: HuBERT frame quantization causes output to be slightly shorter than ideally expected.
+        # We intentionally do NOT pad/extend to match expected length, as artificial waveform
+        # repetition creates artifacts at chunk boundaries. Instead:
+        # - Accept the actual output length (crossfade handles variable-length chunks)
+        # - Only trim if output is too long (rare edge case)
         expected_output_samples = int(original_length * self.sample_rate / 16000)
-        length_diff = abs(len(output) - expected_output_samples)
+        length_diff = len(output) - expected_output_samples
+        logger.info(f"Length check: got {len(output)}, expected {expected_output_samples}, diff={length_diff}")
 
-        if length_diff > 400:  # Allow small rounding differences
-            logger.warning(
-                f"Output length mismatch: got {len(output)}, expected {expected_output_samples} "
-                f"(diff={length_diff})"
-            )
+        if length_diff > 0:
+            # Output too long - trim from end
+            output = output[:expected_output_samples]
+            logger.debug(f"Trimmed {length_diff} extra samples from end")
+        elif length_diff < 0 and abs(length_diff) > 100:
+            # Output too short - resample to stretch to expected length
+            # This maintains timing alignment between chunks
+            output = resample(output, len(output), expected_output_samples)
+            logger.debug(f"Resampled output from {expected_output_samples + length_diff} to {expected_output_samples} samples")
 
         logger.info(f"Final output: shape={output.shape}, min={output.min():.4f}, max={output.max():.4f}")
         return output

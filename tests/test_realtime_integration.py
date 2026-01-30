@@ -1,9 +1,12 @@
 """Integration test for realtime voice conversion pipeline."""
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import numpy as np
-import pytest
 import time
-from unittest.mock import MagicMock, patch
 
 from rcwx.audio.buffer import ChunkBuffer, OutputBuffer
 from rcwx.audio.resample import resample
@@ -233,5 +236,234 @@ class TestBufferContinuity:
             assert max_diff < 0.2, f"Discontinuity at chunk boundary {i}: max_diff={max_diff}"
 
 
+def test_actual_gui_code_path():
+    """
+    Test using ACTUAL RealtimeVoiceChanger code path.
+    This is exactly what happens when GUI processes audio.
+    """
+    import sys
+    from pathlib import Path
+    from scipy.io import wavfile
+
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+
+    from rcwx.config import RCWXConfig
+    from rcwx.pipeline.inference import RVCPipeline
+    from rcwx.pipeline.realtime import RealtimeConfig, RealtimeVoiceChanger
+    from rcwx.audio.crossfade import CrossfadeState, apply_crossfade, trim_edges
+
+    print("=" * 70)
+    print("Actual GUI Code Path Test")
+    print("=" * 70)
+
+    # Load config
+    config = RCWXConfig.load()
+    if not config.last_model_path:
+        print("SKIP: No model configured")
+        return
+
+    print(f"\nModel: {config.last_model_path}")
+
+    # Create pipeline
+    pipeline = RVCPipeline(
+        config.last_model_path,
+        device=config.device,
+        use_compile=False,
+    )
+    pipeline.load()
+
+    # Create RealtimeVoiceChanger exactly like GUI does
+    rt_config = RealtimeConfig(
+        mic_sample_rate=48000,
+        output_sample_rate=48000,
+        chunk_sec=config.audio.chunk_sec or 0.5,
+        pitch_shift=config.inference.pitch_shift,
+        use_f0=config.inference.use_f0,
+        f0_method=config.inference.f0_method,
+        index_rate=config.inference.index_ratio if config.inference.use_index else 0.0,
+        voice_gate_mode=config.inference.voice_gate_mode,
+        energy_threshold=config.inference.energy_threshold,
+        use_feature_cache=config.inference.use_feature_cache,
+        context_sec=config.inference.context_sec,
+        extra_sec=config.inference.extra_sec,
+        crossfade_sec=config.inference.crossfade_sec,
+        lookahead_sec=config.inference.lookahead_sec,
+        use_sola=config.inference.use_sola,
+        prebuffer_chunks=1,
+    )
+
+    print(f"\nConfig:")
+    print(f"  chunk_sec={rt_config.chunk_sec}")
+    print(f"  context_sec={rt_config.context_sec}")
+    print(f"  crossfade_sec={rt_config.crossfade_sec}")
+
+    changer = RealtimeVoiceChanger(pipeline, config=rt_config)
+
+    # Load test audio
+    voice_path = Path("sample_data/kakita.wav")
+    if not voice_path.exists():
+        voice_path = Path("sample_data/pure_sine.wav")
+    if not voice_path.exists():
+        print("SKIP: No test audio")
+        return
+
+    sr, voice_data = wavfile.read(voice_path)
+    if voice_data.dtype == np.int16:
+        voice_data = voice_data.astype(np.float32) / 32768.0
+    if len(voice_data.shape) > 1:
+        voice_data = voice_data[:, 0]
+    voice_data = voice_data[:int(5 * sr)]  # First 5 seconds
+    print(f"Input: {voice_path}, {len(voice_data)/sr:.2f}s @ {sr}Hz")
+
+    # Initialize like start() does
+    pipeline.clear_cache()
+    changer.mic_chunk_samples = int(changer.config.mic_sample_rate * changer.config.chunk_sec)
+    changer.mic_context_samples = int(changer.config.mic_sample_rate * changer.config.context_sec)
+    changer.mic_lookahead_samples = int(changer.config.mic_sample_rate * changer.config.lookahead_sec)
+
+    changer.input_buffer = ChunkBuffer(
+        changer.mic_chunk_samples,
+        crossfade_samples=0,
+        context_samples=changer.mic_context_samples,
+        lookahead_samples=changer.mic_lookahead_samples,
+    )
+
+    changer.output_crossfade_samples = int(
+        changer.config.output_sample_rate * changer.config.crossfade_sec
+    )
+    changer.output_extra_samples = int(
+        changer.config.output_sample_rate * changer.config.extra_sec
+    )
+    changer.output_context_samples = int(
+        changer.config.output_sample_rate * changer.config.context_sec
+    )
+
+    changer._crossfade_state = CrossfadeState(cf_samples=changer.output_crossfade_samples)
+
+    # Warmup
+    print("Warming up...")
+    mic_total = (changer.mic_chunk_samples + changer.mic_context_samples +
+                 changer.mic_lookahead_samples)
+    warmup_samples = int(mic_total * changer.config.input_sample_rate /
+                        changer.config.mic_sample_rate)
+
+    warmup_audio = np.zeros(warmup_samples, dtype=np.float32)
+    _ = pipeline.infer(warmup_audio, input_sr=changer.config.input_sample_rate,
+                       pitch_shift=0, f0_method=changer.config.f0_method if changer.config.use_f0 else "none",
+                       index_rate=0.0, voice_gate_mode="off", use_feature_cache=False)
+
+    t = np.arange(warmup_samples) / changer.config.input_sample_rate
+    warmup_audio = (0.3 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+    for _ in range(3):
+        _ = pipeline.infer(warmup_audio, input_sr=changer.config.input_sample_rate,
+                           pitch_shift=changer.config.pitch_shift,
+                           f0_method=changer.config.f0_method if changer.config.use_f0 else "none",
+                           index_rate=changer.config.index_rate,
+                           voice_gate_mode=changer.config.voice_gate_mode,
+                           use_feature_cache=True)
+
+    # Reset
+    changer.stats.reset()
+    changer.input_buffer.clear()
+    changer.output_buffer.clear()
+    changer._chunks_ready = 0
+    changer._crossfade_state = CrossfadeState(cf_samples=changer.output_crossfade_samples)
+
+    # Process using ACTUAL _inference_thread logic
+    print("Processing...")
+    outputs = []
+    mic_block_size = 4096
+    input_pos = 0
+    chunk_count = 0
+
+    while input_pos < len(voice_data):
+        block = voice_data[input_pos:input_pos + mic_block_size]
+        if len(block) < mic_block_size:
+            block = np.pad(block, (0, mic_block_size - len(block)))
+        changer.input_buffer.add_input(block)
+        input_pos += mic_block_size
+
+        while changer.input_buffer.has_chunk():
+            chunk = changer.input_buffer.get_chunk()
+            if chunk is None:
+                break
+
+            # EXACT CODE FROM _inference_thread
+            if changer.config.input_gain_db != 0.0:
+                gain_linear = 10 ** (changer.config.input_gain_db / 20)
+                chunk = chunk * gain_linear
+
+            if changer.config.mic_sample_rate != changer.config.input_sample_rate:
+                chunk = resample(chunk, changer.config.mic_sample_rate, changer.config.input_sample_rate)
+
+            output = pipeline.infer(
+                chunk, input_sr=changer.config.input_sample_rate,
+                pitch_shift=changer.config.pitch_shift,
+                f0_method=changer.config.f0_method if changer.config.use_f0 else "none",
+                index_rate=changer.config.index_rate,
+                voice_gate_mode=changer.config.voice_gate_mode,
+                energy_threshold=changer.config.energy_threshold,
+                use_feature_cache=changer.config.use_feature_cache,
+            )
+
+            if pipeline.sample_rate != changer.config.output_sample_rate:
+                output = resample(output, pipeline.sample_rate, changer.config.output_sample_rate)
+
+            max_val = np.max(np.abs(output))
+            if max_val > 1.0:
+                output = np.tanh(output)
+
+            trimmed_output = trim_edges(
+                output,
+                context_samples=changer.output_context_samples,
+                extra_samples=changer.output_extra_samples,
+            )
+
+            cf_result = apply_crossfade(
+                trimmed_output,
+                changer._crossfade_state,
+                use_sola=changer.config.use_sola,
+                sola_search_ratio=changer.config.sola_search_ratio,
+            )
+
+            outputs.append(cf_result.audio)
+            chunk_count += 1
+            if chunk_count <= 3:
+                print(f"  Chunk {chunk_count}: len={len(cf_result.audio)}")
+
+    print(f"Total chunks: {chunk_count}")
+
+    if len(outputs) < 2:
+        print("ERROR: Not enough output")
+        return
+
+    full_output = np.concatenate(outputs)
+    print(f"Total output: {len(full_output)/48000:.2f}s")
+
+    # Save
+    out_path = Path("tests/test_gui_path_output.wav")
+    max_val = np.abs(full_output).max()
+    if max_val > 0:
+        full_output = full_output / max_val * 0.9
+    wavfile.write(out_path, 48000, (full_output * 32767).astype(np.int16))
+    print(f"Saved: {out_path}")
+
+    # Analyze
+    print("\n--- Boundary Jumps ---")
+    pos = 0
+    jumps = []
+    for i, o in enumerate(outputs):
+        if i > 0 and i < 10:
+            jump = abs(full_output[pos] - full_output[pos-1])
+            jumps.append(jump)
+            print(f"  {i}: {jump:.6f}")
+        pos += len(o)
+
+    max_jump = max(jumps) if jumps else 0
+    print(f"\nMax jump: {max_jump:.6f} (target < 0.1)")
+    print(f"Result: {'PASS' if max_jump < 0.1 else 'FAIL'}")
+
+
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    # Run the actual GUI code path test
+    test_actual_gui_code_path()

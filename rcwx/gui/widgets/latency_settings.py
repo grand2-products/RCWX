@@ -1,0 +1,370 @@
+"""Latency settings widget with mode selection and advanced controls."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Callable, Optional
+
+import customtkinter as ctk
+
+
+@dataclass
+class LatencyPreset:
+    """Preset for latency configuration."""
+
+    name: str
+    description: str
+    chunk_sec: float
+    prebuffer_chunks: int
+    buffer_margin: float
+    context_sec: float
+    lookahead_sec: float
+    crossfade_sec: float
+    use_sola: bool
+
+
+# Predefined latency presets
+LATENCY_PRESETS = {
+    "low": LatencyPreset(
+        name="低遅延",
+        description="~400ms (音切れリスクあり)",
+        chunk_sec=0.2,
+        prebuffer_chunks=0,
+        buffer_margin=0.5,
+        context_sec=0.03,
+        lookahead_sec=0.0,
+        crossfade_sec=0.03,
+        use_sola=True,
+    ),
+    "balanced": LatencyPreset(
+        name="バランス",
+        description="~500ms (推奨)",
+        chunk_sec=0.35,
+        prebuffer_chunks=1,
+        buffer_margin=0.5,
+        context_sec=0.05,
+        lookahead_sec=0.0,
+        crossfade_sec=0.05,
+        use_sola=True,
+    ),
+    "quality": LatencyPreset(
+        name="高品質",
+        description="~700ms (安定重視)",
+        chunk_sec=0.5,
+        prebuffer_chunks=2,
+        buffer_margin=1.0,
+        context_sec=0.08,
+        lookahead_sec=0.05,
+        crossfade_sec=0.08,
+        use_sola=True,
+    ),
+}
+
+
+class LatencySettingsFrame(ctk.CTkFrame):
+    """
+    Latency settings widget with mode selection and advanced controls.
+
+    Provides both simple preset selection and detailed parameter adjustment.
+    """
+
+    def __init__(
+        self,
+        master: ctk.CTk,
+        on_settings_changed: Optional[Callable[[], None]] = None,
+        **kwargs,
+    ):
+        super().__init__(master, **kwargs)
+
+        self.on_settings_changed = on_settings_changed
+
+        # Current settings (start with balanced)
+        self._current_preset = "balanced"
+        preset = LATENCY_PRESETS["balanced"]
+        self.chunk_sec = preset.chunk_sec
+        self.prebuffer_chunks = preset.prebuffer_chunks
+        self.buffer_margin = preset.buffer_margin
+        self.context_sec = preset.context_sec
+        self.lookahead_sec = preset.lookahead_sec
+        self.crossfade_sec = preset.crossfade_sec
+        self.use_sola = preset.use_sola
+
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        """Setup the UI components."""
+        # Header
+        header = ctk.CTkLabel(
+            self,
+            text="レイテンシ設定",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        header.grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 5))
+
+        # Mode selection (radio buttons)
+        self.mode_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.mode_frame.grid(row=1, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
+
+        self.mode_var = ctk.StringVar(value="balanced")
+
+        for i, (key, preset) in enumerate(LATENCY_PRESETS.items()):
+            rb = ctk.CTkRadioButton(
+                self.mode_frame,
+                text=f"{preset.name} {preset.description}",
+                variable=self.mode_var,
+                value=key,
+                command=self._on_mode_change,
+            )
+            rb.grid(row=i, column=0, padx=5, pady=2, sticky="w")
+
+        # Advanced settings toggle
+        self.advanced_var = ctk.BooleanVar(value=False)
+        self.advanced_toggle = ctk.CTkCheckBox(
+            self,
+            text="詳細設定を表示",
+            variable=self.advanced_var,
+            command=self._toggle_advanced,
+        )
+        self.advanced_toggle.grid(row=2, column=0, columnspan=2, padx=10, pady=(10, 5), sticky="w")
+
+        # Advanced settings frame (hidden by default)
+        self.advanced_frame = ctk.CTkFrame(self)
+        self._setup_advanced_controls()
+
+        # Configure grid
+        self.grid_columnconfigure(0, weight=1)
+
+    def _create_slider_row(
+        self,
+        parent: ctk.CTkFrame,
+        label: str,
+        row: int,
+        from_: float,
+        to: float,
+        steps: int,
+        value: float,
+        value_text: str,
+        command: Callable,
+        label_width: int = 50,
+    ) -> tuple[ctk.CTkSlider, ctk.CTkLabel]:
+        """Create a labeled slider row. Returns (slider, value_label)."""
+        ctk.CTkLabel(parent, text=label, font=ctk.CTkFont(size=11)).grid(
+            row=row, column=0, padx=10, pady=(10, 0), sticky="w"
+        )
+        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        frame.grid(row=row + 1, column=0, padx=10, pady=2, sticky="ew")
+
+        slider = ctk.CTkSlider(frame, from_=from_, to=to, number_of_steps=steps, width=180, command=command)
+        slider.set(value)
+        slider.grid(row=0, column=0, padx=(0, 10))
+
+        value_label = ctk.CTkLabel(frame, text=value_text, width=label_width)
+        value_label.grid(row=0, column=1)
+
+        return slider, value_label
+
+    def _setup_advanced_controls(self) -> None:
+        """Setup advanced control sliders."""
+        frame = self.advanced_frame
+
+        self.chunk_slider, self.chunk_value = self._create_slider_row(
+            frame, "チャンクサイズ", 0, 100, 600, 50,
+            self.chunk_sec * 1000, f"{int(self.chunk_sec * 1000)}ms", self._on_chunk_change,
+        )
+        self.prebuf_slider, self.prebuf_value = self._create_slider_row(
+            frame, "プリバッファ", 2, 0, 3, 3,
+            self.prebuffer_chunks, f"{self.prebuffer_chunks}チャンク", self._on_prebuf_change, 70,
+        )
+        self.margin_slider, self.margin_value = self._create_slider_row(
+            frame, "バッファマージン", 4, 0.3, 2.0, 17,
+            self.buffer_margin, f"{self.buffer_margin:.1f}x", self._on_margin_change,
+        )
+        self.context_slider, self.context_value = self._create_slider_row(
+            frame, "コンテキスト", 6, 0, 100, 20,
+            self.context_sec * 1000, f"{int(self.context_sec * 1000)}ms", self._on_context_change,
+        )
+        self.crossfade_slider, self.crossfade_value = self._create_slider_row(
+            frame, "クロスフェード", 8, 0, 100, 20,
+            self.crossfade_sec * 1000, f"{int(self.crossfade_sec * 1000)}ms", self._on_crossfade_change,
+        )
+        self.lookahead_slider, self.lookahead_value = self._create_slider_row(
+            frame, "右コンテキスト (+遅延)", 10, 0, 100, 20,
+            self.lookahead_sec * 1000, f"{int(self.lookahead_sec * 1000)}ms", self._on_lookahead_change,
+        )
+
+        # SOLA checkbox
+        self.sola_var = ctk.BooleanVar(value=self.use_sola)
+        self.sola_checkbox = ctk.CTkCheckBox(
+            frame,
+            text="SOLA (位相揃えクロスフェード)",
+            variable=self.sola_var,
+            command=self._on_sola_change,
+        )
+        self.sola_checkbox.grid(row=12, column=0, padx=10, pady=(10, 5), sticky="w")
+
+        # Estimated latency display
+        self.estimate_label = ctk.CTkLabel(
+            frame,
+            text="推定レイテンシ: --ms",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#66b3ff",
+        )
+        self.estimate_label.grid(row=13, column=0, padx=10, pady=(10, 10), sticky="w")
+
+        frame.grid_columnconfigure(0, weight=1)
+        self._update_estimate()
+
+    def _toggle_advanced(self) -> None:
+        """Toggle advanced settings visibility."""
+        if self.advanced_var.get():
+            self.advanced_frame.grid(row=3, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
+        else:
+            self.advanced_frame.grid_forget()
+
+    def _on_mode_change(self) -> None:
+        """Handle mode selection change."""
+        mode = self.mode_var.get()
+        self._current_preset = mode
+        preset = LATENCY_PRESETS[mode]
+
+        # Update values
+        self.chunk_sec = preset.chunk_sec
+        self.prebuffer_chunks = preset.prebuffer_chunks
+        self.buffer_margin = preset.buffer_margin
+        self.context_sec = preset.context_sec
+        self.lookahead_sec = preset.lookahead_sec
+        self.crossfade_sec = preset.crossfade_sec
+        self.use_sola = preset.use_sola
+
+        # Update sliders if advanced is visible
+        if self.advanced_var.get():
+            self.chunk_slider.set(self.chunk_sec * 1000)
+            self.chunk_value.configure(text=f"{int(self.chunk_sec * 1000)}ms")
+            self.prebuf_slider.set(self.prebuffer_chunks)
+            self.prebuf_value.configure(text=f"{self.prebuffer_chunks}チャンク")
+            self.margin_slider.set(self.buffer_margin)
+            self.margin_value.configure(text=f"{self.buffer_margin:.1f}x")
+            self.context_slider.set(self.context_sec * 1000)
+            self.context_value.configure(text=f"{int(self.context_sec * 1000)}ms")
+            self.crossfade_slider.set(self.crossfade_sec * 1000)
+            self.crossfade_value.configure(text=f"{int(self.crossfade_sec * 1000)}ms")
+            self.lookahead_slider.set(self.lookahead_sec * 1000)
+            self.lookahead_value.configure(text=f"{int(self.lookahead_sec * 1000)}ms")
+            self.sola_var.set(self.use_sola)
+            self._update_estimate()
+
+        self._notify_change()
+
+    def _on_chunk_change(self, value: float) -> None:
+        """Handle chunk size slider change."""
+        self.chunk_sec = value / 1000
+        self.chunk_value.configure(text=f"{int(value)}ms")
+        self._update_estimate()
+        self._notify_change()
+
+    def _on_prebuf_change(self, value: float) -> None:
+        """Handle prebuffer slider change."""
+        self.prebuffer_chunks = int(round(value))
+        self.prebuf_value.configure(text=f"{self.prebuffer_chunks}チャンク")
+        self._update_estimate()
+        self._notify_change()
+
+    def _on_margin_change(self, value: float) -> None:
+        """Handle buffer margin slider change."""
+        self.buffer_margin = round(value, 1)
+        self.margin_value.configure(text=f"{self.buffer_margin:.1f}x")
+        self._update_estimate()
+        self._notify_change()
+
+    def _on_context_change(self, value: float) -> None:
+        """Handle context size slider change."""
+        self.context_sec = value / 1000
+        self.context_value.configure(text=f"{int(value)}ms")
+        self._notify_change()
+
+    def _on_crossfade_change(self, value: float) -> None:
+        """Handle crossfade size slider change."""
+        self.crossfade_sec = value / 1000
+        self.crossfade_value.configure(text=f"{int(value)}ms")
+        self._notify_change()
+
+    def _on_lookahead_change(self, value: float) -> None:
+        """Handle lookahead slider change."""
+        self.lookahead_sec = value / 1000
+        self.lookahead_value.configure(text=f"{int(value)}ms")
+        self._update_estimate()
+        self._notify_change()
+
+    def _on_sola_change(self) -> None:
+        """Handle SOLA checkbox change."""
+        self.use_sola = self.sola_var.get()
+        self._notify_change()
+
+    def _update_estimate(self) -> None:
+        """Update estimated latency display."""
+        # Estimate: chunk + lookahead + inference(~50ms) + buffer
+        # Buffer size ≈ prebuffer * chunk + margin * chunk
+        inference_est = 50  # ms
+        buffer_est = (self.prebuffer_chunks + self.buffer_margin) * self.chunk_sec * 1000
+        lookahead_est = self.lookahead_sec * 1000
+        total_est = self.chunk_sec * 1000 + lookahead_est + inference_est + buffer_est
+
+        self.estimate_label.configure(text=f"推定レイテンシ: ~{int(total_est)}ms")
+
+    def _notify_change(self) -> None:
+        """Notify that settings have changed."""
+        if self.on_settings_changed:
+            self.on_settings_changed()
+
+    def get_settings(self) -> dict:
+        """Get current latency settings as a dictionary."""
+        return {
+            "chunk_sec": self.chunk_sec,
+            "prebuffer_chunks": self.prebuffer_chunks,
+            "buffer_margin": self.buffer_margin,
+            "context_sec": self.context_sec,
+            "lookahead_sec": self.lookahead_sec,
+            "crossfade_sec": self.crossfade_sec,
+            "use_sola": self.use_sola,
+        }
+
+    def set_preset(self, preset_name: str) -> None:
+        """Set a preset by name."""
+        if preset_name in LATENCY_PRESETS:
+            self.mode_var.set(preset_name)
+            self._on_mode_change()
+
+    def set_values(
+        self,
+        chunk_sec: float,
+        prebuffer_chunks: int,
+        buffer_margin: float,
+        context_sec: float,
+        lookahead_sec: float,
+        crossfade_sec: float,
+        use_sola: bool = True,
+    ) -> None:
+        """Set individual values directly (for restoring saved settings)."""
+        self.chunk_sec = chunk_sec
+        self.prebuffer_chunks = prebuffer_chunks
+        self.buffer_margin = buffer_margin
+        self.context_sec = context_sec
+        self.lookahead_sec = lookahead_sec
+        self.crossfade_sec = crossfade_sec
+        self.use_sola = use_sola
+
+        # Update sliders
+        self.chunk_slider.set(chunk_sec * 1000)
+        self.chunk_value.configure(text=f"{int(chunk_sec * 1000)}ms")
+        self.prebuf_slider.set(prebuffer_chunks)
+        self.prebuf_value.configure(text=f"{prebuffer_chunks}チャンク")
+        self.margin_slider.set(buffer_margin)
+        self.margin_value.configure(text=f"{buffer_margin:.1f}x")
+        self.context_slider.set(context_sec * 1000)
+        self.context_value.configure(text=f"{int(context_sec * 1000)}ms")
+        self.crossfade_slider.set(crossfade_sec * 1000)
+        self.crossfade_value.configure(text=f"{int(crossfade_sec * 1000)}ms")
+        self.lookahead_slider.set(lookahead_sec * 1000)
+        self.lookahead_value.configure(text=f"{int(lookahead_sec * 1000)}ms")
+        self.sola_var.set(use_sola)
+        self._update_estimate()

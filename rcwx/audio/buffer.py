@@ -11,6 +11,12 @@ class ChunkBuffer:
     Audio chunk buffer with crossfade support.
 
     Manages input buffering and output crossfading for real-time processing.
+
+    w-okada style processing:
+    - Each chunk includes left_context (from previous) and right_context (lookahead)
+    - Structure: [left_context | main | right_context]
+    - Model processes with both contexts for higher quality output
+    - Output is trimmed to keep only the "main" portion
     """
 
     def __init__(
@@ -18,18 +24,21 @@ class ChunkBuffer:
         chunk_samples: int,
         crossfade_samples: int,
         context_samples: int = 0,
+        lookahead_samples: int = 0,
     ):
         """
         Initialize the chunk buffer.
 
         Args:
-            chunk_samples: Number of samples per processing chunk
+            chunk_samples: Number of samples per processing chunk (main + left_context)
             crossfade_samples: Number of samples for crossfade overlap
-            context_samples: Additional context samples for inference
+            context_samples: Left context samples for inference (overlap with previous chunk)
+            lookahead_samples: Right context samples for inference (requires future samples)
         """
         self.chunk_samples = chunk_samples
         self.crossfade_samples = crossfade_samples
         self.context_samples = context_samples
+        self.lookahead_samples = lookahead_samples
 
         # Input buffer for accumulating samples
         self._input_buffer: NDArray[np.float32] = np.array([], dtype=np.float32)
@@ -56,25 +65,29 @@ class ChunkBuffer:
 
     def has_chunk(self) -> bool:
         """Check if a full chunk is available for processing."""
-        required = self.chunk_samples + self.context_samples
+        # Need: chunk_samples + context_samples + lookahead for full processing
+        # But only advance by chunk_samples, so we need lookahead available
+        required = self.chunk_samples + self.context_samples + self.lookahead_samples
         return len(self._input_buffer) >= required
 
     def get_chunk(self) -> NDArray[np.float32] | None:
         """
-        Get a chunk for processing (with context).
+        Get a chunk for processing (with left and right context).
 
         Returns:
-            Audio chunk including context, or None if not enough samples
+            Audio chunk: [left_context | main | right_context]
+            Or None if not enough samples
         """
-        required = self.chunk_samples + self.context_samples
+        required = self.chunk_samples + self.context_samples + self.lookahead_samples
         if len(self._input_buffer) < required:
             return None
 
-        # Extract chunk with context
+        # Extract chunk with both contexts
+        # Structure: [left_context | main | right_context]
         chunk = self._input_buffer[:required].copy()
 
-        # Remove processed samples (keep context for next chunk)
-        self._input_buffer = self._input_buffer[self.chunk_samples :]
+        # Remove processed samples (keep context + lookahead for next chunk)
+        self._input_buffer = self._input_buffer[self.chunk_samples:]
 
         return chunk
 

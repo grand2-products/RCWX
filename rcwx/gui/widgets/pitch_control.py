@@ -19,12 +19,14 @@ class PitchControl(ctk.CTkFrame):
         master: ctk.CTk,
         on_pitch_changed: Optional[Callable[[int], None]] = None,
         on_f0_mode_changed: Optional[Callable[[bool], None]] = None,
+        on_f0_method_changed: Optional[Callable[[str], None]] = None,
         **kwargs,
     ):
         super().__init__(master, **kwargs)
 
         self.on_pitch_changed = on_pitch_changed
         self.on_f0_mode_changed = on_f0_mode_changed
+        self.on_f0_method_changed = on_f0_method_changed
 
         self._pitch: int = 0
         self._use_f0: bool = True
@@ -108,16 +110,25 @@ class PitchControl(ctk.CTkFrame):
             value="rmvpe",
             command=self._on_f0_change,
         )
-        self.rmvpe_rb.grid(row=0, column=0, padx=10, pady=5)
+        self.rmvpe_rb.grid(row=0, column=0, padx=5, pady=5)
+
+        self.fcpe_rb = ctk.CTkRadioButton(
+            self.f0_frame,
+            text="FCPE (低遅延)",
+            variable=self.f0_var,
+            value="fcpe",
+            command=self._on_f0_change,
+        )
+        self.fcpe_rb.grid(row=0, column=1, padx=5, pady=5)
 
         self.none_rb = ctk.CTkRadioButton(
             self.f0_frame,
-            text="なし (低遅延)",
+            text="なし",
             variable=self.f0_var,
             value="none",
             command=self._on_f0_change,
         )
-        self.none_rb.grid(row=0, column=1, padx=10, pady=5)
+        self.none_rb.grid(row=0, column=2, padx=5, pady=5)
 
         # Configure grid
         self.grid_columnconfigure(1, weight=1)
@@ -146,21 +157,35 @@ class PitchControl(ctk.CTkFrame):
 
     def _on_f0_change(self) -> None:
         """Handle F0 mode change."""
-        self._use_f0 = self.f0_var.get() == "rmvpe"
+        method = self.f0_var.get()
+        self._use_f0 = method != "none"
+        self._f0_method = method
 
         if self.on_f0_mode_changed:
             self.on_f0_mode_changed(self._use_f0)
+
+        if self.on_f0_method_changed:
+            self.on_f0_method_changed(method)
 
     def set_f0_enabled(self, enabled: bool) -> None:
         """Enable or disable F0 controls based on model support."""
         if enabled:
             self.rmvpe_rb.configure(state="normal")
-            self.f0_var.set("rmvpe")
+            self.fcpe_rb.configure(state="normal")
+            if self.f0_var.get() == "none":
+                self.f0_var.set("rmvpe")
             self._use_f0 = True
         else:
             self.rmvpe_rb.configure(state="disabled")
+            self.fcpe_rb.configure(state="disabled")
             self.f0_var.set("none")
             self._use_f0 = False
+
+    def set_f0_method(self, method: str) -> None:
+        """Set F0 method (rmvpe, fcpe, or none)."""
+        self.f0_var.set(method)
+        self._use_f0 = method != "none"
+        self._f0_method = method
 
     @property
     def pitch(self) -> int:
@@ -171,3 +196,8 @@ class PitchControl(ctk.CTkFrame):
     def use_f0(self) -> bool:
         """Get current F0 mode."""
         return self._use_f0
+
+    @property
+    def f0_method(self) -> str:
+        """Get current F0 method (rmvpe, fcpe, or none)."""
+        return self.f0_var.get()

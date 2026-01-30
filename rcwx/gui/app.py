@@ -3,25 +3,34 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import threading
 from pathlib import Path
+from tkinter import filedialog
 from typing import Optional
 
 import customtkinter as ctk
 import numpy as np
 import sounddevice as sd
+from scipy.io import wavfile
 
 from rcwx.audio.resample import resample
 from rcwx.config import RCWXConfig
 from rcwx.device import get_device, get_device_name
 from rcwx.gui.widgets.audio_settings import AudioSettingsFrame
+from rcwx.gui.widgets.latency_settings import LatencySettingsFrame
 from rcwx.gui.widgets.latency_monitor import LatencyMonitor
 from rcwx.gui.widgets.model_selector import ModelSelector
 from rcwx.gui.widgets.pitch_control import PitchControl
 from rcwx.audio.denoise import is_ml_denoiser_available
 from rcwx.pipeline.inference import RVCPipeline
 from rcwx.pipeline.realtime import RealtimeConfig, RealtimeStats, RealtimeVoiceChanger
+
+# Set PortAudio API preference for Windows (WASAPI for better compatibility)
+# This prevents WDM-KS errors with certain audio drivers
+if sys.platform == "win32":
+    os.environ.setdefault("PA_USE_WASAPI", "1")
 
 logger = logging.getLogger(__name__)
 
@@ -126,8 +135,12 @@ class RCWXApp(ctk.CTk):
             self.left_column,
             on_pitch_changed=self._on_pitch_changed,
             on_f0_mode_changed=self._on_f0_mode_changed,
+            on_f0_method_changed=self._on_f0_method_changed,
         )
         self.pitch_control.pack(fill="x", pady=(0, 10))
+
+        # Restore saved F0 method
+        self.pitch_control.set_f0_method(self.config.inference.f0_method)
 
         # Index control
         self.index_frame = ctk.CTkFrame(self.left_column)
@@ -236,6 +249,100 @@ class RCWXApp(ctk.CTk):
         )
         self.denoise_status.pack(anchor="w", padx=10, pady=(0, 10))
 
+        # Voice gate control
+        self.voice_gate_frame = ctk.CTkFrame(self.left_column)
+        self.voice_gate_frame.pack(fill="x", pady=(0, 10))
+
+        self.voice_gate_label = ctk.CTkLabel(
+            self.voice_gate_frame,
+            text="■ Voice Gate",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        self.voice_gate_label.pack(anchor="w", padx=10, pady=(10, 5))
+
+        self.voice_gate_mode_frame = ctk.CTkFrame(self.voice_gate_frame, fg_color="transparent")
+        self.voice_gate_mode_frame.pack(fill="x", padx=10, pady=(0, 5))
+
+        self.voice_gate_mode_label = ctk.CTkLabel(
+            self.voice_gate_mode_frame,
+            text="モード:",
+            font=ctk.CTkFont(size=11),
+        )
+        self.voice_gate_mode_label.grid(row=0, column=0, padx=(0, 5))
+
+        self.voice_gate_mode_var = ctk.StringVar(value=self.config.inference.voice_gate_mode)
+        self.voice_gate_mode_menu = ctk.CTkOptionMenu(
+            self.voice_gate_mode_frame,
+            variable=self.voice_gate_mode_var,
+            values=["off", "strict", "expand", "energy"],
+            width=120,
+            command=lambda _: self._on_voice_gate_mode_changed(),
+        )
+        self.voice_gate_mode_menu.grid(row=0, column=1, padx=5)
+
+        # Energy threshold slider (only visible when mode is "energy")
+        self.energy_threshold_frame = ctk.CTkFrame(self.voice_gate_frame, fg_color="transparent")
+        self.energy_threshold_frame.pack(fill="x", padx=10, pady=(5, 0))
+
+        self.energy_threshold_label = ctk.CTkLabel(
+            self.energy_threshold_frame,
+            text="閾値:",
+            font=ctk.CTkFont(size=11),
+        )
+        self.energy_threshold_label.grid(row=0, column=0, padx=(0, 5))
+
+        self.energy_threshold_slider = ctk.CTkSlider(
+            self.energy_threshold_frame,
+            from_=0.01,
+            to=0.20,
+            number_of_steps=19,
+            width=120,
+            command=self._on_energy_threshold_changed,
+        )
+        self.energy_threshold_slider.set(self.config.inference.energy_threshold)
+        self.energy_threshold_slider.grid(row=0, column=1, padx=5)
+
+        self.energy_threshold_value = ctk.CTkLabel(
+            self.energy_threshold_frame,
+            text=f"{self.config.inference.energy_threshold:.2f}",
+            width=40,
+        )
+        self.energy_threshold_value.grid(row=0, column=2)
+
+        # Show/hide based on current mode
+        if self.config.inference.voice_gate_mode != "energy":
+            self.energy_threshold_frame.pack_forget()
+
+        self.voice_gate_desc = ctk.CTkLabel(
+            self.voice_gate_frame,
+            text="off=全通過 / strict=F0のみ / expand=破裂音対応 / energy=エネルギー併用",
+            font=ctk.CTkFont(size=9),
+            text_color="gray",
+        )
+        self.voice_gate_desc.pack(anchor="w", padx=10, pady=(0, 10))
+
+        # Chunk processing options
+        self.chunk_frame = ctk.CTkFrame(self.left_column)
+        self.chunk_frame.pack(fill="x", pady=(0, 10))
+
+        self.chunk_label = ctk.CTkLabel(
+            self.chunk_frame,
+            text="■ チャンク処理",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        self.chunk_label.pack(anchor="w", padx=10, pady=(10, 5))
+
+        self.use_feature_cache_var = ctk.BooleanVar(value=self.config.inference.use_feature_cache)
+        self.use_feature_cache_cb = ctk.CTkCheckBox(
+            self.chunk_frame,
+            text="特徴量キャッシュ (HuBERT/F0継続性)",
+            variable=self.use_feature_cache_var,
+            command=self._on_feature_cache_changed,
+        )
+        self.use_feature_cache_cb.pack(anchor="w", padx=10, pady=(2, 10))
+
+        # Note: Context, Lookahead, SOLA settings are in the Latency Settings panel (Audio tab)
+
         # === Right column ===
         self.right_column = ctk.CTkFrame(self.main_columns, fg_color="transparent")
         self.right_column.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
@@ -325,7 +432,17 @@ class RCWXApp(ctk.CTk):
             self.audio_scroll,
             on_settings_changed=self._on_audio_settings_changed,
         )
-        self.audio_settings.pack(fill="both", expand=True, padx=10, pady=10)
+        self.audio_settings.pack(fill="x", padx=10, pady=10)
+
+        # Latency settings (mode selection + advanced controls)
+        self.latency_settings = LatencySettingsFrame(
+            self.audio_scroll,
+            on_settings_changed=self._on_latency_settings_changed,
+        )
+        self.latency_settings.pack(fill="x", padx=10, pady=10)
+
+        # Restore saved latency settings
+        self._restore_latency_settings()
 
         # Restore saved audio settings
         saved_gain = self.config.audio.input_gain_db
@@ -333,14 +450,6 @@ class RCWXApp(ctk.CTk):
             self.audio_settings.gain_slider.set(saved_gain)
             self.audio_settings.input_gain_db = saved_gain
             self.audio_settings.gain_value_label.configure(text=f"{saved_gain:+.0f} dB")
-
-        # Restore chunk size
-        saved_chunk = self.config.audio.chunk_sec
-        for label, value in self.audio_settings.chunk_options:
-            if value == saved_chunk:
-                self.audio_settings.chunk_var.set(label)
-                self.audio_settings.chunk_sec = saved_chunk
-                break
 
         # Restore saved device selections
         if self.config.audio.input_device_name:
@@ -433,6 +542,303 @@ class RCWXApp(ctk.CTk):
         )
         self.settings_info.pack(anchor="w", padx=20, pady=5)
 
+        # === Audio Test Section ===
+        self._setup_audio_test_section()
+
+    def _setup_audio_test_section(self) -> None:
+        """Setup audio test section for file-based conversion."""
+        # Separator
+        separator = ctk.CTkFrame(self.settings_scroll, height=2, fg_color="gray50")
+        separator.pack(fill="x", padx=20, pady=(30, 10))
+
+        # Section label
+        test_label = ctk.CTkLabel(
+            self.settings_scroll,
+            text="オーディオテスト",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        test_label.pack(anchor="w", padx=20, pady=(10, 5))
+
+        test_desc = ctk.CTkLabel(
+            self.settings_scroll,
+            text="WAVファイルを選択して変換テストを実行できます",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+        )
+        test_desc.pack(anchor="w", padx=20, pady=(0, 10))
+
+        # File selection frame
+        file_frame = ctk.CTkFrame(self.settings_scroll, fg_color="transparent")
+        file_frame.pack(fill="x", padx=20, pady=5)
+
+        self.test_file_entry = ctk.CTkEntry(
+            file_frame,
+            width=350,
+            placeholder_text="WAVファイルを選択...",
+        )
+        self.test_file_entry.pack(side="left", padx=(0, 10))
+
+        self.test_browse_btn = ctk.CTkButton(
+            file_frame,
+            text="参照",
+            width=60,
+            command=self._browse_test_file,
+        )
+        self.test_browse_btn.pack(side="left")
+
+        # Control buttons frame
+        ctrl_frame = ctk.CTkFrame(self.settings_scroll, fg_color="transparent")
+        ctrl_frame.pack(fill="x", padx=20, pady=10)
+
+        self.test_convert_btn = ctk.CTkButton(
+            ctrl_frame,
+            text="変換",
+            width=80,
+            command=self._convert_test_file,
+        )
+        self.test_convert_btn.pack(side="left", padx=(0, 10))
+
+        self.test_play_btn = ctk.CTkButton(
+            ctrl_frame,
+            text="再生",
+            width=80,
+            command=self._play_converted_audio,
+            state="disabled",
+        )
+        self.test_play_btn.pack(side="left", padx=(0, 10))
+
+        self.test_stop_btn = ctk.CTkButton(
+            ctrl_frame,
+            text="停止",
+            width=80,
+            command=self._stop_test_playback,
+            state="disabled",
+        )
+        self.test_stop_btn.pack(side="left", padx=(0, 10))
+
+        self.test_save_btn = ctk.CTkButton(
+            ctrl_frame,
+            text="保存",
+            width=80,
+            command=self._save_converted_audio,
+            state="disabled",
+        )
+        self.test_save_btn.pack(side="left")
+
+        # Status label
+        self.test_status_label = ctk.CTkLabel(
+            self.settings_scroll,
+            text="",
+            font=ctk.CTkFont(size=11),
+        )
+        self.test_status_label.pack(anchor="w", padx=20, pady=5)
+
+        # State for converted audio
+        self._converted_audio: Optional[np.ndarray] = None
+        self._converted_sr: int = 48000
+        self._test_playback_stream: Optional[sd.OutputStream] = None
+
+    def _browse_test_file(self) -> None:
+        """Open file dialog to select a WAV file."""
+        filepath = filedialog.askopenfilename(
+            title="WAVファイルを選択",
+            filetypes=[
+                ("WAV files", "*.wav"),
+                ("All files", "*.*"),
+            ],
+        )
+        if filepath:
+            self.test_file_entry.delete(0, "end")
+            self.test_file_entry.insert(0, filepath)
+            self.test_status_label.configure(text="")
+            # Disable play/save until converted
+            self.test_play_btn.configure(state="disabled")
+            self.test_save_btn.configure(state="disabled")
+            self._converted_audio = None
+
+    def _convert_test_file(self) -> None:
+        """Convert the selected WAV file."""
+        filepath = self.test_file_entry.get().strip()
+        if not filepath:
+            self.test_status_label.configure(text="ファイルを選択してください", text_color="orange")
+            return
+
+        if not Path(filepath).exists():
+            self.test_status_label.configure(text="ファイルが見つかりません", text_color="red")
+            return
+
+        if not self.pipeline:
+            self.test_status_label.configure(
+                text="モデルを先に読み込んでください", text_color="red"
+            )
+            return
+
+        # Disable buttons during conversion
+        self.test_convert_btn.configure(state="disabled")
+        self.test_status_label.configure(text="変換中...", text_color="white")
+
+        def convert_thread():
+            try:
+                # Read WAV file
+                sr_in, audio = wavfile.read(filepath)
+
+                # Convert to float32 [-1, 1]
+                if audio.dtype == np.int16:
+                    audio = audio.astype(np.float32) / 32768.0
+                elif audio.dtype == np.int32:
+                    audio = audio.astype(np.float32) / 2147483648.0
+                elif audio.dtype == np.float64:
+                    audio = audio.astype(np.float32)
+
+                # Convert to mono if stereo
+                if audio.ndim > 1:
+                    audio = audio.mean(axis=1)
+
+                # Run conversion
+                output = self.pipeline.infer(
+                    audio,
+                    input_sr=sr_in,
+                    pitch_shift=self.pitch_control.pitch,
+                    f0_method=self.pitch_control.f0_method,
+                    index_rate=self._get_index_rate(),
+                )
+
+                self._converted_audio = output
+                self._converted_sr = self.pipeline.sample_rate
+
+                # Update UI
+                duration = len(output) / self._converted_sr
+                self.after(0, lambda d=duration: self._on_conversion_done(d))
+
+            except Exception as e:
+                logger.error(f"Conversion failed: {e}")
+                error_msg = str(e)
+                self.after(0, lambda msg=error_msg: self._on_conversion_error(msg))
+
+        thread = threading.Thread(target=convert_thread, daemon=True)
+        thread.start()
+
+    def _on_conversion_done(self, duration: float) -> None:
+        """Called when conversion completes successfully."""
+        self.test_convert_btn.configure(state="normal")
+        self.test_play_btn.configure(state="normal")
+        self.test_save_btn.configure(state="normal")
+        self.test_status_label.configure(
+            text=f"変換完了 ({duration:.1f}秒, {self._converted_sr}Hz)",
+            text_color="green",
+        )
+
+    def _on_conversion_error(self, error: str) -> None:
+        """Called when conversion fails."""
+        self.test_convert_btn.configure(state="normal")
+        self.test_status_label.configure(text=f"エラー: {error}", text_color="red")
+
+    def _play_converted_audio(self) -> None:
+        """Play the converted audio."""
+        if self._converted_audio is None:
+            return
+
+        # Stop any existing playback
+        self._stop_test_playback()
+
+        # Normalize for playback
+        audio = self._converted_audio.copy()
+        max_val = np.abs(audio).max()
+        if max_val > 0:
+            audio = audio / max_val * 0.9
+
+        # Start playback
+        self._playback_position = 0
+        self._playback_audio = audio
+
+        def callback(outdata, frames, time, status):
+            if status:
+                logger.warning(f"Playback status: {status}")
+
+            start = self._playback_position
+            end = start + frames
+
+            if start >= len(self._playback_audio):
+                outdata.fill(0)
+                raise sd.CallbackStop()
+
+            chunk = self._playback_audio[start:end]
+            if len(chunk) < frames:
+                outdata[: len(chunk), 0] = chunk
+                outdata[len(chunk) :, 0] = 0
+                raise sd.CallbackStop()
+            else:
+                outdata[:, 0] = chunk
+
+            self._playback_position = end
+
+        try:
+            self._test_playback_stream = sd.OutputStream(
+                samplerate=self._converted_sr,
+                channels=1,
+                callback=callback,
+                finished_callback=self._on_playback_finished,
+            )
+            self._test_playback_stream.start()
+            self.test_play_btn.configure(state="disabled")
+            self.test_stop_btn.configure(state="normal")
+            self.test_status_label.configure(text="再生中...", text_color="cyan")
+        except Exception as e:
+            logger.error(f"Playback failed: {e}")
+            self.test_status_label.configure(text=f"再生エラー: {e}", text_color="red")
+
+    def _stop_test_playback(self) -> None:
+        """Stop audio playback."""
+        if self._test_playback_stream is not None:
+            try:
+                self._test_playback_stream.stop()
+                self._test_playback_stream.close()
+            except Exception:
+                pass
+            self._test_playback_stream = None
+
+        self.test_play_btn.configure(
+            state="normal" if self._converted_audio is not None else "disabled"
+        )
+        self.test_stop_btn.configure(state="disabled")
+
+    def _on_playback_finished(self) -> None:
+        """Called when playback finishes."""
+        self.after(0, self._stop_test_playback)
+        self.after(
+            0,
+            lambda: self.test_status_label.configure(
+                text=f"変換完了 ({len(self._converted_audio) / self._converted_sr:.1f}秒, {self._converted_sr}Hz)",
+                text_color="green",
+            ),
+        )
+
+    def _save_converted_audio(self) -> None:
+        """Save the converted audio to a file."""
+        if self._converted_audio is None:
+            return
+
+        filepath = filedialog.asksaveasfilename(
+            title="変換した音声を保存",
+            defaultextension=".wav",
+            filetypes=[("WAV files", "*.wav")],
+        )
+        if filepath:
+            try:
+                # Normalize and convert to int16
+                audio = self._converted_audio.copy()
+                max_val = np.abs(audio).max()
+                if max_val > 0:
+                    audio = audio / max_val * 0.9
+                audio_int16 = (audio * 32767).astype(np.int16)
+                wavfile.write(filepath, self._converted_sr, audio_int16)
+                self.test_status_label.configure(
+                    text=f"保存完了: {Path(filepath).name}", text_color="green"
+                )
+            except Exception as e:
+                logger.error(f"Save failed: {e}")
+                self.test_status_label.configure(text=f"保存エラー: {e}", text_color="red")
+
     def _apply_settings(self) -> None:
         """Apply settings and reload model."""
         if self.model_selector.model_path:
@@ -488,7 +894,8 @@ class RCWXApp(ctk.CTk):
                 self.after(0, self._on_model_loaded)
             except Exception as e:
                 logger.error(f"Failed to load model: {e}")
-                self.after(0, lambda: self._on_model_load_error(str(e)))
+                error_msg = str(e)
+                self.after(0, lambda msg=error_msg: self._on_model_load_error(msg))
 
         thread = threading.Thread(target=load_thread, daemon=True)
         thread.start()
@@ -512,7 +919,8 @@ class RCWXApp(ctk.CTk):
             self.status_bar.set_device(device_name)
 
             # Update index status
-            if self.pipeline.faiss_index is not None:
+            index_loaded = self.pipeline.faiss_index is not None
+            if index_loaded:
                 n_vectors = self.pipeline.faiss_index.ntotal
                 self.index_status.configure(
                     text=f"Index読込済 ({n_vectors}ベクトル)",
@@ -523,6 +931,9 @@ class RCWXApp(ctk.CTk):
                     text="Indexなし",
                     text_color="gray",
                 )
+
+            # Update status bar index indicator
+            self.status_bar.set_index_status(index_loaded, self._get_index_rate())
 
     def _on_model_load_error(self, error: str) -> None:
         """Called when model loading fails."""
@@ -557,12 +968,21 @@ class RCWXApp(ctk.CTk):
         if self.voice_changer:
             self.voice_changer.set_f0_mode(use_f0)
 
+    def _on_f0_method_changed(self, method: str) -> None:
+        """Handle F0 method change (rmvpe/fcpe/none)."""
+        self._save_config()
+        if self.voice_changer:
+            self.voice_changer.set_f0_method(method)
+
     def _on_index_changed(self) -> None:
         """Handle index checkbox change."""
         self._save_config()
         # Update voice changer if running
         if self.voice_changer:
             self.voice_changer.set_index_rate(self._get_index_rate())
+        # Update status bar
+        index_loaded = self.pipeline is not None and self.pipeline.faiss_index is not None
+        self.status_bar.set_index_status(index_loaded, self._get_index_rate())
 
     def _on_denoise_changed(self) -> None:
         """Handle denoise settings change."""
@@ -581,6 +1001,39 @@ class RCWXApp(ctk.CTk):
         # Update voice changer if running
         if self.voice_changer:
             self.voice_changer.set_index_rate(self._get_index_rate())
+        # Update status bar
+        index_loaded = self.pipeline is not None and self.pipeline.faiss_index is not None
+        self.status_bar.set_index_status(index_loaded, self._get_index_rate())
+
+    def _on_voice_gate_mode_changed(self) -> None:
+        """Handle voice gate mode change."""
+        mode = self.voice_gate_mode_var.get()
+        # Show/hide energy threshold slider
+        if mode == "energy":
+            self.energy_threshold_frame.pack(fill="x", padx=10, pady=(5, 0))
+            # Re-pack description after slider
+            self.voice_gate_desc.pack_forget()
+            self.voice_gate_desc.pack(anchor="w", padx=10, pady=(0, 10))
+        else:
+            self.energy_threshold_frame.pack_forget()
+        self._save_config()
+        # Update voice changer if running
+        if self.voice_changer:
+            self.voice_changer.set_voice_gate_mode(mode)
+
+    def _on_energy_threshold_changed(self, value: float) -> None:
+        """Handle energy threshold slider change."""
+        self.energy_threshold_value.configure(text=f"{value:.2f}")
+        self._save_config()
+        # Update voice changer if running
+        if self.voice_changer:
+            self.voice_changer.set_energy_threshold(value)
+
+    def _on_feature_cache_changed(self) -> None:
+        """Handle feature cache toggle change."""
+        self._save_config()
+        if self.voice_changer:
+            self.voice_changer.set_feature_cache(self.use_feature_cache_var.get())
 
     def _get_index_rate(self) -> float:
         """Get current index rate (0 if disabled)."""
@@ -588,12 +1041,42 @@ class RCWXApp(ctk.CTk):
             return self.index_ratio_slider.get()
         return 0.0
 
+    def _restore_latency_settings(self) -> None:
+        """Restore latency settings from config."""
+        if not hasattr(self, "latency_settings"):
+            return
+
+        # Restore saved values
+        self.latency_settings.set_values(
+            chunk_sec=self.config.audio.chunk_sec,
+            prebuffer_chunks=self.config.audio.prebuffer_chunks,
+            buffer_margin=self.config.audio.buffer_margin,
+            context_sec=self.config.inference.context_sec,
+            lookahead_sec=self.config.inference.lookahead_sec,
+            crossfade_sec=self.config.inference.crossfade_sec,
+            use_sola=self.config.inference.use_sola,
+        )
+
     def _on_audio_settings_changed(self) -> None:
         """Handle audio settings change."""
         # Update device display in main panel
         self._update_audio_device_display()
         # Save immediately
         self._save_config()
+
+    def _on_latency_settings_changed(self) -> None:
+        """Handle latency settings change."""
+        # Save immediately
+        self._save_config()
+        # Apply changes in real-time if voice changer is running
+        if hasattr(self, "latency_settings") and self.voice_changer:
+            settings = self.latency_settings.get_settings()
+            logger.debug(f"Latency settings changed: {settings}")
+            # Apply real-time settings
+            self.voice_changer.set_context(settings["context_sec"])
+            self.voice_changer.set_lookahead(settings["lookahead_sec"])
+            self.voice_changer.set_crossfade(settings["crossfade_sec"])
+            self.voice_changer.set_sola(settings["use_sola"])
 
     def _save_config(self) -> None:
         """Save all config settings immediately."""
@@ -604,9 +1087,22 @@ class RCWXApp(ctk.CTk):
             self.config.inference.use_compile = self.compile_var.get()
             self.config.inference.use_index = self.use_index_var.get()
             self.config.inference.index_ratio = self.index_ratio_slider.get()
+            self.config.inference.f0_method = self.pitch_control.f0_method
             self.config.inference.denoise.enabled = self.use_denoise_var.get()
             self.config.inference.denoise.method = self.denoise_method_var.get()
-            self.config.audio.chunk_sec = self.audio_settings.chunk_sec
+            self.config.inference.voice_gate_mode = self.voice_gate_mode_var.get()
+            self.config.inference.energy_threshold = self.energy_threshold_slider.get()
+            self.config.inference.use_feature_cache = self.use_feature_cache_var.get()
+            # Save latency settings (all from LatencySettingsFrame)
+            if hasattr(self, "latency_settings"):
+                latency = self.latency_settings.get_settings()
+                self.config.audio.chunk_sec = latency["chunk_sec"]
+                self.config.audio.prebuffer_chunks = latency["prebuffer_chunks"]
+                self.config.audio.buffer_margin = latency["buffer_margin"]
+                self.config.inference.context_sec = latency["context_sec"]
+                self.config.inference.lookahead_sec = latency["lookahead_sec"]
+                self.config.inference.crossfade_sec = latency["crossfade_sec"]
+                self.config.inference.use_sola = latency["use_sola"]
             self.config.audio.input_gain_db = self.audio_settings.input_gain_db
             self.config.audio.input_device_name = self.audio_settings.get_input_device_name()
             self.config.audio.output_device_name = self.audio_settings.get_output_device_name()
@@ -638,6 +1134,7 @@ class RCWXApp(ctk.CTk):
         """Check if input and output use the same audio interface (potential feedback)."""
         try:
             import sounddevice as sd
+
             devices = sd.query_devices()
 
             input_idx = self.audio_settings.input_device
@@ -666,7 +1163,7 @@ class RCWXApp(ctk.CTk):
             return False
 
     def _start_voice_changer(self) -> None:
-        """Start the voice changer."""
+        """Start voice changer asynchronously."""
         if self.pipeline is None:
             logger.warning("No model loaded")
             return
@@ -681,43 +1178,112 @@ class RCWXApp(ctk.CTk):
                 "フィードバック警告",
                 "入力と出力が同じオーディオインターフェースを使用しています。\n"
                 "フィードバックループが発生する可能性があります。\n\n"
-                "推奨: USBマイクなど、別のインターフェースを入力に使用してください。"
+                "推奨: USBマイクなど、別のインターフェースを入力に使用してください。",
             )
 
         # Stop audio monitor to avoid device conflict
         self.audio_settings.stop_monitor()
 
-        # Create realtime config with auto-detected sample rates
-        rt_config = RealtimeConfig(
-            input_device=self.audio_settings.input_device,
-            output_device=self.audio_settings.output_device,
-            mic_sample_rate=self.audio_settings.input_sample_rate,
-            output_sample_rate=self.audio_settings.output_sample_rate,
-            chunk_sec=self.audio_settings.chunk_sec,
-            pitch_shift=self.pitch_control.pitch,
-            use_f0=self.pitch_control.use_f0,
-            input_gain_db=self.audio_settings.input_gain_db,
-            index_rate=self._get_index_rate(),
-            denoise_enabled=self.use_denoise_var.get(),
-            denoise_method=self.denoise_method_var.get(),
-        )
+        # Disable button and show loading state
+        self.start_btn.configure(state="disabled", text="⏳ 起動中...")
+        self._loading = True
+        self.status_bar.set_loading()
 
-        # Create voice changer
-        self.voice_changer = RealtimeVoiceChanger(
-            self.pipeline,
-            config=rt_config,
-        )
-        self.voice_changer.on_stats_update = self._on_stats_update
-        self.voice_changer.on_error = self._on_inference_error
-
-        # Start
+        # NOTE: sounddevice/PortAudio requires audio streams to be created
+        # from the main thread on Windows. Running in a separate thread
+        # causes "Invalid sample rate" or other errors.
         try:
+            # Get latency settings
+            latency = self.latency_settings.get_settings()
+
+            # Create realtime config with auto-detected sample rates
+            rt_config = RealtimeConfig(
+                input_device=self.audio_settings.input_device,
+                output_device=self.audio_settings.output_device,
+                mic_sample_rate=self.audio_settings.input_sample_rate,
+                output_sample_rate=self.audio_settings.output_sample_rate,
+                # Latency settings (from LatencySettingsFrame)
+                chunk_sec=latency["chunk_sec"],
+                prebuffer_chunks=latency["prebuffer_chunks"],
+                buffer_margin=latency["buffer_margin"],
+                context_sec=latency["context_sec"],
+                crossfade_sec=latency["crossfade_sec"],
+                # Pitch settings
+                pitch_shift=self.pitch_control.pitch,
+                use_f0=self.pitch_control.use_f0,
+                f0_method=self.pitch_control.f0_method,
+                # Audio settings
+                input_gain_db=self.audio_settings.input_gain_db,
+                index_rate=self._get_index_rate(),
+                denoise_enabled=self.use_denoise_var.get(),
+                denoise_method=self.denoise_method_var.get(),
+                voice_gate_mode=self.voice_gate_mode_var.get(),
+                energy_threshold=self.energy_threshold_slider.get(),
+                use_feature_cache=self.use_feature_cache_var.get(),
+                # w-okada style processing (from LatencySettingsFrame)
+                extra_sec=self.config.inference.extra_sec,
+                lookahead_sec=latency["lookahead_sec"],
+                use_sola=latency["use_sola"],
+            )
+
+            # Create voice changer
+            self.voice_changer = RealtimeVoiceChanger(
+                self.pipeline,
+                config=rt_config,
+            )
+            self.voice_changer.on_stats_update = self._on_stats_update
+            self.voice_changer.on_error = self._on_inference_error
+
+            # Update UI before starting (may take a moment for warmup)
+            self.update_idletasks()
+
+            # Start (this calls pipeline.load() internally)
+            # Must be called from main thread due to sounddevice limitations
             self.voice_changer.start()
-            self._is_running = True
-            self.start_btn.configure(text="■ 停止", fg_color="#cc3333")
-            self.status_bar.set_running(True)
+
+            # Success
+            self._on_voice_changer_started()
         except Exception as e:
             logger.error(f"Failed to start voice changer: {e}")
+            self._on_start_error(str(e))
+
+    def _on_voice_changer_started(self) -> None:
+        """Called when voice changer starts successfully."""
+        self._loading = False
+        self._is_running = True
+        self.start_btn.configure(text="■ 停止", fg_color="#cc3333", state="normal")
+        self.status_bar.set_running(True)
+
+    def _on_start_error(self, error_msg: str) -> None:
+        """Called when voice changer fails to start."""
+        self._loading = False
+        self.start_btn.configure(text="▶ 開始", fg_color=["#3B8ED0", "#1F6AA5"], state="normal")
+        self.status_bar.set_running(False)
+
+        # Provide helpful message for common errors
+        if "WdmSyncIoctl" in error_msg or "WDM-KS" in error_msg:
+            self._show_warning(
+                "オーディオデバイスエラー",
+                f"オーディオデバイスでエラーが発生しました。\n\n"
+                f"詳細: {error_msg[:100]}...\n\n"
+                "解決策:\n"
+                "1. 別のオーディオデバイスを試してください\n"
+                "2. チャンクサイズを大きくしてください（オーディオタブ）\n"
+                "3. Windowsの「サウンド設定」でデバイスを確認してください",
+            )
+        elif (
+            "Output size is too small" in error_msg
+            or "size" in error_msg.lower()
+            and "0" in error_msg
+        ):
+            self._show_warning(
+                "チャンクサイズエラー",
+                "チャンクサイズが小さすぎます。\n\n"
+                "オーディオタブでチャンクサイズを増やしてください。\n"
+                "推奨: 350ms以上",
+            )
+        else:
+            self._show_error(f"起動エラー: {error_msg}")
 
     def _stop_voice_changer(self) -> None:
         """Stop the voice changer."""
@@ -773,126 +1339,154 @@ class RCWXApp(ctk.CTk):
         self.model_selector.status_label.configure(text=short_msg, text_color="#ff6666")
 
     def _run_audio_test(self) -> None:
-        """Run audio test: record -> convert -> playback."""
+        """Run audio test: record -> convert -> playback.
+
+        NOTE: sounddevice/PortAudio on Windows requires audio streams to be
+        created from the main thread. Running sd.rec() or sd.play() in a
+        separate thread causes "Invalid sample rate" or WDM-KS errors.
+        """
         if self._is_running:
             self.test_status.configure(text="変換中は使用できません", text_color="orange")
             return
 
         # Disable button during test
         self.test_btn.configure(state="disabled")
-        self.test_status.configure(text="録音中...", text_color="white")
+        self.test_status.configure(text="🔴 録音中...", text_color="#ff6666")
+        self.update_idletasks()
 
-        def test_thread():
-            try:
-                from scipy.io import wavfile
-                duration = 3.0  # seconds
+        try:
+            from scipy.io import wavfile
 
-                # Debug output directory
-                debug_dir = Path("debug_audio")
-                debug_dir.mkdir(exist_ok=True)
+            duration = 3.0  # seconds
 
-                # Get device settings (auto-detected sample rates)
-                input_device = self.audio_settings.input_device
-                output_device = self.audio_settings.output_device
-                mic_sr = self.audio_settings.input_sample_rate
-                out_sr = self.audio_settings.output_sample_rate
-                process_sr = 16000  # HuBERT/RMVPE expect 16kHz
+            # Debug output directory
+            debug_dir = Path("debug_audio")
+            debug_dir.mkdir(exist_ok=True)
 
-                # Record at device's native rate
-                logger.info(f"Recording: device={input_device}, sr={mic_sr}, duration={duration}s")
-                self.after(0, lambda: self.test_status.configure(text="🔴 録音中...", text_color="#ff6666"))
-                audio_raw = sd.rec(
-                    int(duration * mic_sr),
-                    samplerate=mic_sr,
-                    channels=1,
-                    dtype=np.float32,
-                    device=input_device,
+            # Get device settings (auto-detected sample rates)
+            input_device = self.audio_settings.input_device
+            output_device = self.audio_settings.output_device
+            mic_sr = self.audio_settings.input_sample_rate
+            out_sr = self.audio_settings.output_sample_rate
+            process_sr = 16000  # HuBERT/RMVPE expect 16kHz
+
+            # Record at device's native rate
+            # Must run on main thread for Windows compatibility
+            logger.info(f"Recording: device={input_device}, sr={mic_sr}, duration={duration}s")
+            audio_raw = sd.rec(
+                int(duration * mic_sr),
+                samplerate=mic_sr,
+                channels=1,
+                dtype=np.float32,
+                device=input_device,
+            )
+            sd.wait()
+            audio_raw = audio_raw.flatten()
+            logger.info(
+                f"Recorded: shape={audio_raw.shape}, min={audio_raw.min():.4f}, max={audio_raw.max():.4f}"
+            )
+
+            # Apply input gain
+            input_gain_db = self.audio_settings.input_gain_db
+            if input_gain_db != 0.0:
+                gain_linear = 10 ** (input_gain_db / 20)
+                audio_raw = audio_raw * gain_linear
+                logger.info(f"Applied gain: {input_gain_db:+.0f} dB, max={audio_raw.max():.4f}")
+
+            # Save raw input (with gain applied)
+            wavfile.write(debug_dir / "01_input_raw.wav", mic_sr, audio_raw)
+            logger.info(f"Saved: debug_audio/01_input_raw.wav ({mic_sr}Hz)")
+
+            # Resample to 16kHz for processing
+            audio = audio_raw
+            if mic_sr != process_sr:
+                audio = resample(audio, mic_sr, process_sr)
+                logger.info(
+                    f"Resampled to 16kHz: shape={audio.shape}, min={audio.min():.4f}, max={audio.max():.4f}"
                 )
-                sd.wait()
-                audio_raw = audio_raw.flatten()
-                logger.info(f"Recorded: shape={audio_raw.shape}, min={audio_raw.min():.4f}, max={audio_raw.max():.4f}")
 
-                # Apply input gain
-                input_gain_db = self.audio_settings.input_gain_db
-                if input_gain_db != 0.0:
-                    gain_linear = 10 ** (input_gain_db / 20)
-                    audio_raw = audio_raw * gain_linear
-                    logger.info(f"Applied gain: {input_gain_db:+.0f} dB, max={audio_raw.max():.4f}")
+            # Save resampled input
+            wavfile.write(debug_dir / "02_input_16k.wav", process_sr, audio)
+            logger.info(f"Saved: debug_audio/02_input_16k.wav ({process_sr}Hz)")
 
-                # Save raw input (with gain applied)
-                wavfile.write(debug_dir / "01_input_raw.wav", mic_sr, audio_raw)
-                logger.info(f"Saved: debug_audio/01_input_raw.wav ({mic_sr}Hz)")
+            # Convert if pipeline is loaded
+            output_sr = out_sr  # Default to output device rate
+            if self.pipeline is not None:
+                self.test_status.configure(text="🔄 変換中...", text_color="#66b3ff")
+                self.update_idletasks()
 
-                # Resample to 16kHz for processing
-                audio = audio_raw
-                if mic_sr != process_sr:
-                    audio = resample(audio, mic_sr, process_sr)
-                    logger.info(f"Resampled to 16kHz: shape={audio.shape}, min={audio.min():.4f}, max={audio.max():.4f}")
+                import torch
 
-                # Save resampled input
-                wavfile.write(debug_dir / "02_input_16k.wav", process_sr, audio)
-                logger.info(f"Saved: debug_audio/02_input_16k.wav ({process_sr}Hz)")
+                audio_tensor = torch.from_numpy(audio).float()
+                audio_converted = self.pipeline.infer(
+                    audio_tensor,
+                    pitch_shift=self.pitch_control.pitch,
+                    f0_method=self.pitch_control.f0_method,
+                    index_rate=self._get_index_rate(),
+                    voice_gate_mode=self.voice_gate_mode_var.get(),
+                    energy_threshold=self.energy_threshold_slider.get(),
+                    use_feature_cache=False,  # Single test, no chunk continuity needed
+                )
 
-                # Convert if pipeline is loaded
-                output_sr = out_sr  # Default to output device rate
-                if self.pipeline is not None:
-                    self.after(0, lambda: self.test_status.configure(text="🔄 変換中...", text_color="#66b3ff"))
-                    import torch
-                    audio_tensor = torch.from_numpy(audio).float()
-                    f0_method = "rmvpe" if self.pitch_control.use_f0 else "none"
-                    audio_converted = self.pipeline.infer(
-                        audio_tensor,
-                        pitch_shift=self.pitch_control.pitch,
-                        f0_method=f0_method,
-                        index_rate=self._get_index_rate(),
-                    )
+                # Save converted output at model rate
+                model_sr = self.pipeline.sample_rate
+                wavfile.write(debug_dir / "03_output_model.wav", model_sr, audio_converted)
+                logger.info(f"Saved: debug_audio/03_output_model.wav ({model_sr}Hz)")
 
-                    # Save converted output at model rate
-                    model_sr = self.pipeline.sample_rate
-                    wavfile.write(debug_dir / "03_output_model.wav", model_sr, audio_converted)
-                    logger.info(f"Saved: debug_audio/03_output_model.wav ({model_sr}Hz)")
-
-                    # Resample from model rate to output device rate
-                    if model_sr != out_sr:
-                        audio = resample(audio_converted, model_sr, out_sr)
-                    else:
-                        audio = audio_converted
+                # Resample from model rate to output device rate
+                if model_sr != out_sr:
+                    audio = resample(audio_converted, model_sr, out_sr)
                 else:
-                    # No conversion - resample back to output rate for playback
-                    if process_sr != out_sr:
-                        audio = resample(audio, process_sr, out_sr)
+                    audio = audio_converted
+            else:
+                # No conversion - resample back to output rate for playback
+                if process_sr != out_sr:
+                    audio = resample(audio, process_sr, out_sr)
 
-                # Save final output
-                wavfile.write(debug_dir / "04_output_final.wav", out_sr, audio)
-                logger.info(f"Saved: debug_audio/04_output_final.wav ({out_sr}Hz)")
+            # Save final output
+            wavfile.write(debug_dir / "04_output_final.wav", out_sr, audio)
+            logger.info(f"Saved: debug_audio/04_output_final.wav ({out_sr}Hz)")
 
-                # Playback at output device's native rate
-                self.after(0, lambda: self.test_status.configure(text="🔊 再生中...", text_color="#66ff66"))
-                sd.play(audio, samplerate=output_sr, device=output_device)
-                sd.wait()
+            # Playback at output device's native rate
+            # Must run on main thread for Windows compatibility
+            self.test_status.configure(text="🔊 再生中...", text_color="#66ff66")
+            self.update_idletasks()
+            sd.play(audio, samplerate=output_sr, device=output_device)
+            sd.wait()
 
-                # Done
-                if self.pipeline is not None:
-                    self.after(0, lambda: self.test_status.configure(text="✓ 完了 (debug_audio/に保存)", text_color="green"))
-                else:
-                    self.after(0, lambda: self.test_status.configure(text="✓ 完了 (変換なし)", text_color="gray"))
+            # Done
+            if self.pipeline is not None:
+                self.test_status.configure(
+                    text="✓ 完了 (debug_audio/に保存)", text_color="green"
+                )
+            else:
+                self.test_status.configure(
+                    text="✓ 完了 (変換なし)", text_color="gray"
+                )
 
-            except Exception as e:
-                logger.error(f"Audio test failed: {e}")
-                error_msg = str(e)[:40]
-                self.after(0, lambda msg=error_msg: self.test_status.configure(text=f"エラー: {msg}", text_color="red"))
+        except Exception as e:
+            logger.error(f"Audio test failed: {e}")
+            error_msg = str(e)[:40]
+            self.test_status.configure(
+                text=f"エラー: {error_msg}", text_color="red"
+            )
 
-            finally:
-                self.after(0, lambda: self.test_btn.configure(state="normal"))
-
-        thread = threading.Thread(target=test_thread, daemon=True)
-        thread.start()
+        finally:
+            self.test_btn.configure(state="normal")
 
     def _on_close(self) -> None:
         """Handle window close."""
         # Stop voice changer
         if self._is_running:
             self._stop_voice_changer()
+
+        # Stop test playback
+        if hasattr(self, "_test_playback_stream") and self._test_playback_stream is not None:
+            try:
+                self._test_playback_stream.stop()
+                self._test_playback_stream.close()
+            except Exception:
+                pass
 
         # Stop audio monitor
         self.audio_settings.stop_monitor()

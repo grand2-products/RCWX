@@ -646,7 +646,8 @@ class SynthesizerTrnMs256NSFsid(nn.Module):
             x_mask = x_mask[:, :, head : head + tail]
             pitchf = pitchf[:, head : head + tail]
 
-        z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * 0.7
+        # Match RVC WebUI: noise coefficient 0.66666, apply x_mask to z_p
+        z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * 0.66666) * x_mask
         z = self.flow(z_p, x_mask, g=g, reverse=True)
 
         n_res = return_length2 if return_length2 > 0 else None
@@ -786,7 +787,8 @@ class SynthesizerTrnMs256NSFsidNono(nn.Module):
             logs_p = logs_p[:, :, head : head + tail]
             x_mask = x_mask[:, :, head : head + tail]
 
-        z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * 0.7
+        # Match RVC WebUI: noise coefficient 0.66666, apply x_mask to z_p
+        z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * 0.66666) * x_mask
         z = self.flow(z_p, x_mask, g=g, reverse=True)
 
         n_res = return_length2 if return_length2 > 0 else None
