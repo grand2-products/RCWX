@@ -45,8 +45,8 @@ class RCWXApp(ctk.CTk):
 
         # Configure window
         self.title("RCWX - RVC Voice Changer")
-        self.geometry("650x550")
-        self.minsize(600, 500)
+        self.geometry("800x550")
+        self.minsize(800, 500)
 
         # Set appearance
         ctk.set_appearance_mode("dark")
@@ -84,7 +84,7 @@ class RCWXApp(ctk.CTk):
         """Setup the main UI layout."""
         # Create tabview
         self.tabview = ctk.CTkTabview(self)
-        self.tabview.pack(fill="both", expand=True, padx=10, pady=(10, 5))
+        self.tabview.pack(fill="both", expand=True, padx=10, pady=(5, 3))
 
         # Add tabs
         self.tab_main = self.tabview.add("メイン")
@@ -105,30 +105,53 @@ class RCWXApp(ctk.CTk):
 
         # Status bar
         self.status_bar = LatencyMonitor(self, height=40)
-        self.status_bar.pack(fill="x", padx=10, pady=(5, 10))
+        self.status_bar.pack(fill="x", padx=10, pady=(3, 5))
+
+    def _configure_scroll_speed(
+        self, scrollable_frame: ctk.CTkScrollableFrame, speed: int = 3
+    ) -> None:
+        """Configure mouse wheel scroll speed for a CTkScrollableFrame.
+
+        Args:
+            scrollable_frame: The scrollable frame to configure
+            speed: Multiplier for scroll speed (default: 3, higher = faster)
+        """
+        canvas = scrollable_frame._parent_canvas
+
+        def _on_mousewheel(event):
+            # Scroll by speed * units (negative for natural scrolling direction)
+            canvas.yview_scroll(-speed * int(event.delta / 120), "units")
+            return "break"  # Prevent event propagation
+
+        # Bind to the canvas
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        # Also bind to enter/leave events to ensure scrolling works when hovering
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
 
     def _setup_main_tab(self) -> None:
         """Setup the main tab content with 2-column layout."""
         # Scrollable container
         self.main_scroll = ctk.CTkScrollableFrame(self.tab_main, fg_color="transparent")
         self.main_scroll.pack(fill="both", expand=True)
+        self._configure_scroll_speed(self.main_scroll, speed=10)  # Increased scroll speed
 
         # 2-column container
         self.main_columns = ctk.CTkFrame(self.main_scroll, fg_color="transparent")
-        self.main_columns.pack(fill="both", expand=True, padx=5, pady=5)
+        self.main_columns.pack(fill="both", expand=True, padx=3, pady=3)
         self.main_columns.grid_columnconfigure(0, weight=1)
         self.main_columns.grid_columnconfigure(1, weight=1)
 
         # === Left column ===
         self.left_column = ctk.CTkFrame(self.main_columns, fg_color="transparent")
-        self.left_column.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        self.left_column.grid(row=0, column=0, sticky="nsew", padx=3, pady=3)
 
         # Model selector
         self.model_selector = ModelSelector(
             self.left_column,
             on_model_selected=self._on_model_selected,
         )
-        self.model_selector.pack(fill="x", pady=(0, 10))
+        self.model_selector.pack(fill="x", pady=(0, 5))
 
         # Pitch control
         self.pitch_control = PitchControl(
@@ -137,21 +160,21 @@ class RCWXApp(ctk.CTk):
             on_f0_mode_changed=self._on_f0_mode_changed,
             on_f0_method_changed=self._on_f0_method_changed,
         )
-        self.pitch_control.pack(fill="x", pady=(0, 10))
+        self.pitch_control.pack(fill="x", pady=(0, 5))
 
         # Restore saved F0 method
         self.pitch_control.set_f0_method(self.config.inference.f0_method)
 
         # Index control
         self.index_frame = ctk.CTkFrame(self.left_column)
-        self.index_frame.pack(fill="x", pady=(0, 10))
+        self.index_frame.pack(fill="x", pady=(0, 5))
 
         self.index_label = ctk.CTkLabel(
             self.index_frame,
             text="■ Index検索",
             font=ctk.CTkFont(size=12, weight="bold"),
         )
-        self.index_label.pack(anchor="w", padx=10, pady=(10, 5))
+        self.index_label.pack(anchor="w", padx=10, pady=(5, 3))
 
         self.use_index_var = ctk.BooleanVar(value=self.config.inference.use_index)
         self.use_index_cb = ctk.CTkCheckBox(
@@ -160,10 +183,10 @@ class RCWXApp(ctk.CTk):
             variable=self.use_index_var,
             command=self._on_index_changed,
         )
-        self.use_index_cb.pack(anchor="w", padx=10, pady=5)
+        self.use_index_cb.pack(anchor="w", padx=10, pady=3)
 
         self.index_ratio_frame = ctk.CTkFrame(self.index_frame, fg_color="transparent")
-        self.index_ratio_frame.pack(fill="x", padx=10, pady=(0, 10))
+        self.index_ratio_frame.pack(fill="x", padx=10, pady=(0, 5))
 
         self.index_ratio_label = ctk.CTkLabel(
             self.index_ratio_frame,
@@ -196,18 +219,18 @@ class RCWXApp(ctk.CTk):
             font=ctk.CTkFont(size=10),
             text_color="gray",
         )
-        self.index_status.pack(anchor="w", padx=10, pady=(0, 5))
+        self.index_status.pack(anchor="w", padx=10, pady=(0, 3))
 
         # Noise cancellation control
         self.denoise_frame = ctk.CTkFrame(self.left_column)
-        self.denoise_frame.pack(fill="x", pady=(0, 10))
+        self.denoise_frame.pack(fill="x", pady=(0, 5))
 
         self.denoise_label = ctk.CTkLabel(
             self.denoise_frame,
             text="■ ノイズキャンセリング",
             font=ctk.CTkFont(size=12, weight="bold"),
         )
-        self.denoise_label.pack(anchor="w", padx=10, pady=(10, 5))
+        self.denoise_label.pack(anchor="w", padx=10, pady=(5, 3))
 
         self.use_denoise_var = ctk.BooleanVar(value=self.config.inference.denoise.enabled)
         self.use_denoise_cb = ctk.CTkCheckBox(
@@ -216,11 +239,11 @@ class RCWXApp(ctk.CTk):
             variable=self.use_denoise_var,
             command=self._on_denoise_changed,
         )
-        self.use_denoise_cb.pack(anchor="w", padx=10, pady=5)
+        self.use_denoise_cb.pack(anchor="w", padx=10, pady=3)
 
         # Method selection
         self.denoise_method_frame = ctk.CTkFrame(self.denoise_frame, fg_color="transparent")
-        self.denoise_method_frame.pack(fill="x", padx=10, pady=(0, 5))
+        self.denoise_method_frame.pack(fill="x", padx=10, pady=(0, 3))
 
         self.denoise_method_label = ctk.CTkLabel(
             self.denoise_method_frame,
@@ -247,21 +270,21 @@ class RCWXApp(ctk.CTk):
             font=ctk.CTkFont(size=10),
             text_color="green" if is_ml_denoiser_available() else "gray",
         )
-        self.denoise_status.pack(anchor="w", padx=10, pady=(0, 10))
+        self.denoise_status.pack(anchor="w", padx=10, pady=(0, 5))
 
         # Voice gate control
         self.voice_gate_frame = ctk.CTkFrame(self.left_column)
-        self.voice_gate_frame.pack(fill="x", pady=(0, 10))
+        self.voice_gate_frame.pack(fill="x", pady=(0, 5))
 
         self.voice_gate_label = ctk.CTkLabel(
             self.voice_gate_frame,
             text="■ Voice Gate",
             font=ctk.CTkFont(size=12, weight="bold"),
         )
-        self.voice_gate_label.pack(anchor="w", padx=10, pady=(10, 5))
+        self.voice_gate_label.pack(anchor="w", padx=10, pady=(5, 3))
 
         self.voice_gate_mode_frame = ctk.CTkFrame(self.voice_gate_frame, fg_color="transparent")
-        self.voice_gate_mode_frame.pack(fill="x", padx=10, pady=(0, 5))
+        self.voice_gate_mode_frame.pack(fill="x", padx=10, pady=(0, 3))
 
         self.voice_gate_mode_label = ctk.CTkLabel(
             self.voice_gate_mode_frame,
@@ -282,7 +305,7 @@ class RCWXApp(ctk.CTk):
 
         # Energy threshold slider (only visible when mode is "energy")
         self.energy_threshold_frame = ctk.CTkFrame(self.voice_gate_frame, fg_color="transparent")
-        self.energy_threshold_frame.pack(fill="x", padx=10, pady=(5, 0))
+        self.energy_threshold_frame.pack(fill="x", padx=10, pady=(3, 0))
 
         self.energy_threshold_label = ctk.CTkLabel(
             self.energy_threshold_frame,
@@ -319,18 +342,18 @@ class RCWXApp(ctk.CTk):
             font=ctk.CTkFont(size=9),
             text_color="gray",
         )
-        self.voice_gate_desc.pack(anchor="w", padx=10, pady=(0, 10))
+        self.voice_gate_desc.pack(anchor="w", padx=10, pady=(0, 5))
 
         # Chunk processing options
         self.chunk_frame = ctk.CTkFrame(self.left_column)
-        self.chunk_frame.pack(fill="x", pady=(0, 10))
+        self.chunk_frame.pack(fill="x", pady=(0, 5))
 
         self.chunk_label = ctk.CTkLabel(
             self.chunk_frame,
             text="■ チャンク処理",
             font=ctk.CTkFont(size=12, weight="bold"),
         )
-        self.chunk_label.pack(anchor="w", padx=10, pady=(10, 5))
+        self.chunk_label.pack(anchor="w", padx=10, pady=(5, 3))
 
         self.use_feature_cache_var = ctk.BooleanVar(value=self.config.inference.use_feature_cache)
         self.use_feature_cache_cb = ctk.CTkCheckBox(
@@ -339,24 +362,24 @@ class RCWXApp(ctk.CTk):
             variable=self.use_feature_cache_var,
             command=self._on_feature_cache_changed,
         )
-        self.use_feature_cache_cb.pack(anchor="w", padx=10, pady=(2, 10))
+        self.use_feature_cache_cb.pack(anchor="w", padx=10, pady=(2, 5))
 
         # Note: Context, Lookahead, SOLA settings are in the Latency Settings panel (Audio tab)
 
         # === Right column ===
         self.right_column = ctk.CTkFrame(self.main_columns, fg_color="transparent")
-        self.right_column.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
+        self.right_column.grid(row=0, column=1, sticky="nsew", padx=3, pady=3)
 
         # Audio device info section
         self.device_frame = ctk.CTkFrame(self.right_column)
-        self.device_frame.pack(fill="x", pady=(0, 10))
+        self.device_frame.pack(fill="x", pady=(0, 5))
 
         self.device_section_label = ctk.CTkLabel(
             self.device_frame,
             text="■ オーディオデバイス",
             font=ctk.CTkFont(size=12, weight="bold"),
         )
-        self.device_section_label.pack(anchor="w", padx=10, pady=(10, 5))
+        self.device_section_label.pack(anchor="w", padx=10, pady=(5, 3))
 
         # Input device (microphone)
         self.mic_label = ctk.CTkLabel(
@@ -381,25 +404,25 @@ class RCWXApp(ctk.CTk):
             font=ctk.CTkFont(size=11),
             text_color="gray",
         )
-        self.inference_device_label.pack(anchor="w", padx=15, pady=(0, 10))
+        self.inference_device_label.pack(anchor="w", padx=15, pady=(0, 5))
 
         # Test section
         self.test_frame = ctk.CTkFrame(self.right_column)
-        self.test_frame.pack(fill="x", pady=(0, 10))
+        self.test_frame.pack(fill="x", pady=(0, 5))
 
         self.test_label = ctk.CTkLabel(
             self.test_frame,
             text="■ オーディオテスト",
             font=ctk.CTkFont(size=12, weight="bold"),
         )
-        self.test_label.pack(anchor="w", padx=10, pady=(10, 5))
+        self.test_label.pack(anchor="w", padx=10, pady=(5, 3))
 
         self.test_btn = ctk.CTkButton(
             self.test_frame,
             text="🎤 テスト (3秒録音→再生)",
             command=self._run_audio_test,
         )
-        self.test_btn.pack(fill="x", padx=10, pady=(0, 5))
+        self.test_btn.pack(fill="x", padx=10, pady=(0, 3))
 
         self.test_status = ctk.CTkLabel(
             self.test_frame,
@@ -407,11 +430,11 @@ class RCWXApp(ctk.CTk):
             font=ctk.CTkFont(size=11),
             text_color="gray",
         )
-        self.test_status.pack(anchor="w", padx=10, pady=(0, 10))
+        self.test_status.pack(anchor="w", padx=10, pady=(0, 5))
 
         # Start/Stop button
         self.control_frame = ctk.CTkFrame(self.right_column)
-        self.control_frame.pack(fill="x", pady=(0, 10))
+        self.control_frame.pack(fill="x", pady=(0, 5))
 
         self.start_btn = ctk.CTkButton(
             self.control_frame,
@@ -420,26 +443,27 @@ class RCWXApp(ctk.CTk):
             height=60,
             command=self._toggle_running,
         )
-        self.start_btn.pack(fill="x", padx=10, pady=10)
+        self.start_btn.pack(fill="x", padx=10, pady=5)
 
     def _setup_audio_tab(self) -> None:
         """Setup the audio settings tab."""
         # Scrollable container
         self.audio_scroll = ctk.CTkScrollableFrame(self.tab_audio, fg_color="transparent")
         self.audio_scroll.pack(fill="both", expand=True)
+        self._configure_scroll_speed(self.audio_scroll, speed=10)  # Increased scroll speed
 
         self.audio_settings = AudioSettingsFrame(
             self.audio_scroll,
             on_settings_changed=self._on_audio_settings_changed,
         )
-        self.audio_settings.pack(fill="x", padx=10, pady=10)
+        self.audio_settings.pack(fill="x", padx=10, pady=5)
 
         # Latency settings (mode selection + advanced controls)
         self.latency_settings = LatencySettingsFrame(
             self.audio_scroll,
             on_settings_changed=self._on_latency_settings_changed,
         )
-        self.latency_settings.pack(fill="x", padx=10, pady=10)
+        self.latency_settings.pack(fill="x", padx=10, pady=5)
 
         # Restore saved latency settings
         self._restore_latency_settings()
@@ -462,6 +486,7 @@ class RCWXApp(ctk.CTk):
         # Scrollable container
         self.settings_scroll = ctk.CTkScrollableFrame(self.tab_settings, fg_color="transparent")
         self.settings_scroll.pack(fill="both", expand=True)
+        self._configure_scroll_speed(self.settings_scroll, speed=10)  # Increased scroll speed
 
         # Compile option (not available on Windows - Triton not supported)
         compile_default = False if sys.platform == "win32" else self.config.inference.use_compile
@@ -473,7 +498,7 @@ class RCWXApp(ctk.CTk):
                 variable=self.compile_var,
                 command=self._save_config,
             )
-            self.compile_cb.pack(anchor="w", padx=20, pady=10)
+            self.compile_cb.pack(anchor="w", padx=20, pady=5)
 
         # Device selection
         self.device_label = ctk.CTkLabel(
@@ -481,7 +506,7 @@ class RCWXApp(ctk.CTk):
             text="デバイス選択",
             font=ctk.CTkFont(size=12, weight="bold"),
         )
-        self.device_label.pack(anchor="w", padx=20, pady=(20, 5))
+        self.device_label.pack(anchor="w", padx=20, pady=(10, 3))
 
         self.device_var = ctk.StringVar(value=self.config.device)
         self.device_menu = ctk.CTkOptionMenu(
@@ -490,7 +515,7 @@ class RCWXApp(ctk.CTk):
             values=["auto", "xpu", "cuda", "cpu"],
             command=lambda _: self._save_config(),
         )
-        self.device_menu.pack(anchor="w", padx=20, pady=5)
+        self.device_menu.pack(anchor="w", padx=20, pady=3)
 
         # Data type selection
         self.dtype_label = ctk.CTkLabel(
@@ -498,7 +523,7 @@ class RCWXApp(ctk.CTk):
             text="データ型",
             font=ctk.CTkFont(size=12, weight="bold"),
         )
-        self.dtype_label.pack(anchor="w", padx=20, pady=(20, 5))
+        self.dtype_label.pack(anchor="w", padx=20, pady=(10, 3))
 
         self.dtype_var = ctk.StringVar(value=self.config.dtype)
         self.dtype_menu = ctk.CTkOptionMenu(
@@ -507,7 +532,7 @@ class RCWXApp(ctk.CTk):
             values=["float16", "float32", "bfloat16"],
             command=lambda _: self._save_config(),
         )
-        self.dtype_menu.pack(anchor="w", padx=20, pady=5)
+        self.dtype_menu.pack(anchor="w", padx=20, pady=3)
 
         # Models directory
         self.models_dir_label = ctk.CTkLabel(
@@ -515,13 +540,13 @@ class RCWXApp(ctk.CTk):
             text="モデルディレクトリ",
             font=ctk.CTkFont(size=12, weight="bold"),
         )
-        self.models_dir_label.pack(anchor="w", padx=20, pady=(20, 5))
+        self.models_dir_label.pack(anchor="w", padx=20, pady=(10, 3))
 
         self.models_dir_entry = ctk.CTkEntry(
             self.settings_scroll,
             width=400,
         )
-        self.models_dir_entry.pack(anchor="w", padx=20, pady=5)
+        self.models_dir_entry.pack(anchor="w", padx=20, pady=3)
         self.models_dir_entry.insert(0, self.config.models_dir)
         self.models_dir_entry.bind("<FocusOut>", lambda _: self._save_config())
 
@@ -531,7 +556,7 @@ class RCWXApp(ctk.CTk):
             text="設定を適用 (モデル再読込)",
             command=self._apply_settings,
         )
-        self.apply_btn.pack(anchor="w", padx=20, pady=(20, 10))
+        self.apply_btn.pack(anchor="w", padx=20, pady=(10, 5))
 
         # Settings info label
         self.settings_info = ctk.CTkLabel(
@@ -540,7 +565,7 @@ class RCWXApp(ctk.CTk):
             font=ctk.CTkFont(size=11),
             text_color="gray",
         )
-        self.settings_info.pack(anchor="w", padx=20, pady=5)
+        self.settings_info.pack(anchor="w", padx=20, pady=3)
 
         # === Audio Test Section ===
         self._setup_audio_test_section()
@@ -549,7 +574,7 @@ class RCWXApp(ctk.CTk):
         """Setup audio test section for file-based conversion."""
         # Separator
         separator = ctk.CTkFrame(self.settings_scroll, height=2, fg_color="gray50")
-        separator.pack(fill="x", padx=20, pady=(30, 10))
+        separator.pack(fill="x", padx=20, pady=(15, 5))
 
         # Section label
         test_label = ctk.CTkLabel(
@@ -557,7 +582,7 @@ class RCWXApp(ctk.CTk):
             text="オーディオテスト",
             font=ctk.CTkFont(size=14, weight="bold"),
         )
-        test_label.pack(anchor="w", padx=20, pady=(10, 5))
+        test_label.pack(anchor="w", padx=20, pady=(5, 3))
 
         test_desc = ctk.CTkLabel(
             self.settings_scroll,
@@ -565,11 +590,11 @@ class RCWXApp(ctk.CTk):
             font=ctk.CTkFont(size=11),
             text_color="gray",
         )
-        test_desc.pack(anchor="w", padx=20, pady=(0, 10))
+        test_desc.pack(anchor="w", padx=20, pady=(0, 5))
 
         # File selection frame
         file_frame = ctk.CTkFrame(self.settings_scroll, fg_color="transparent")
-        file_frame.pack(fill="x", padx=20, pady=5)
+        file_frame.pack(fill="x", padx=20, pady=3)
 
         self.test_file_entry = ctk.CTkEntry(
             file_frame,
@@ -588,7 +613,7 @@ class RCWXApp(ctk.CTk):
 
         # Control buttons frame
         ctrl_frame = ctk.CTkFrame(self.settings_scroll, fg_color="transparent")
-        ctrl_frame.pack(fill="x", padx=20, pady=10)
+        ctrl_frame.pack(fill="x", padx=20, pady=5)
 
         self.test_convert_btn = ctk.CTkButton(
             ctrl_frame,
@@ -631,7 +656,7 @@ class RCWXApp(ctk.CTk):
             text="",
             font=ctk.CTkFont(size=11),
         )
-        self.test_status_label.pack(anchor="w", padx=20, pady=5)
+        self.test_status_label.pack(anchor="w", padx=20, pady=3)
 
         # State for converted audio
         self._converted_audio: Optional[np.ndarray] = None
@@ -1010,10 +1035,10 @@ class RCWXApp(ctk.CTk):
         mode = self.voice_gate_mode_var.get()
         # Show/hide energy threshold slider
         if mode == "energy":
-            self.energy_threshold_frame.pack(fill="x", padx=10, pady=(5, 0))
+            self.energy_threshold_frame.pack(fill="x", padx=10, pady=(3, 0))
             # Re-pack description after slider
             self.voice_gate_desc.pack_forget()
-            self.voice_gate_desc.pack(anchor="w", padx=10, pady=(0, 10))
+            self.voice_gate_desc.pack(anchor="w", padx=10, pady=(0, 5))
         else:
             self.energy_threshold_frame.pack_forget()
         self._save_config()
@@ -1073,6 +1098,9 @@ class RCWXApp(ctk.CTk):
             settings = self.latency_settings.get_settings()
             logger.debug(f"Latency settings changed: {settings}")
             # Apply real-time settings
+            self.voice_changer.set_chunk_sec(settings["chunk_sec"])
+            self.voice_changer.set_prebuffer_chunks(settings["prebuffer_chunks"])
+            self.voice_changer.set_buffer_margin(settings["buffer_margin"])
             self.voice_changer.set_context(settings["context_sec"])
             self.voice_changer.set_lookahead(settings["lookahead_sec"])
             self.voice_changer.set_crossfade(settings["crossfade_sec"])
@@ -1456,20 +1484,14 @@ class RCWXApp(ctk.CTk):
 
             # Done
             if self.pipeline is not None:
-                self.test_status.configure(
-                    text="✓ 完了 (debug_audio/に保存)", text_color="green"
-                )
+                self.test_status.configure(text="✓ 完了 (debug_audio/に保存)", text_color="green")
             else:
-                self.test_status.configure(
-                    text="✓ 完了 (変換なし)", text_color="gray"
-                )
+                self.test_status.configure(text="✓ 完了 (変換なし)", text_color="gray")
 
         except Exception as e:
             logger.error(f"Audio test failed: {e}")
             error_msg = str(e)[:40]
-            self.test_status.configure(
-                text=f"エラー: {error_msg}", text_color="red"
-            )
+            self.test_status.configure(text=f"エラー: {error_msg}", text_color="red")
 
         finally:
             self.test_btn.configure(state="normal")

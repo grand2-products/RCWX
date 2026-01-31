@@ -52,15 +52,15 @@ class RealtimeConfig:
     output_device: Optional[int] = None
     # Microphone capture rate (native device rate for better compatibility)
     mic_sample_rate: int = 48000
-    # Internal processing rate (HuBERT/RMVPE expect 16kHz)
+    # Internal processing rate (HuBERT/F0 models expect 16kHz)
     input_sample_rate: int = 16000
     output_sample_rate: int = 48000
-    # Note: RMVPE requires at least 32 mel frames (0.32 sec at 160 hop)
-    chunk_sec: float = 0.35
+    # Note: FCPE requires >= 0.10 sec, RMVPE requires >= 0.32 sec
+    chunk_sec: float = 0.15
     pitch_shift: int = 0
     use_f0: bool = True
-    # F0 extraction method: "rmvpe" (accurate, 320ms min) or "fcpe" (fast, 100ms min)
-    f0_method: str = "rmvpe"
+    # F0 extraction method: "fcpe" (fast, 100ms min) or "rmvpe" (accurate, 320ms min)
+    f0_method: str = "fcpe"
     max_queue_size: int = 8
     # Number of chunks to pre-buffer before starting output (1 = minimal latency)
     prebuffer_chunks: int = 1
@@ -150,6 +150,46 @@ class RealtimeVoiceChanger:
         self.audio_input: Optional[AudioInput] = None
         self.audio_output: Optional[AudioOutput] = None
 
+        # Ensure pipeline is loaded and warmed up on initialization
+        # This prevents thread conflicts during start()
+        if not self.pipeline._loaded:
+            self.pipeline.load()
+
+        # Warmup inference (synchronous, in __init__)
+        # XPU/CUDA kernel compilation happens here
+        logger.info("Warming up inference pipeline...")
+        warmup_samples = int(
+            (self.mic_chunk_samples + self.mic_context_samples + self.mic_lookahead_samples)
+            * self.config.input_sample_rate
+            / self.config.mic_sample_rate
+        )
+        try:
+            warmup_audio = np.zeros(warmup_samples, dtype=np.float32)
+            self.pipeline.infer(
+                warmup_audio,
+                input_sr=self.config.input_sample_rate,
+                pitch_shift=0,
+                f0_method=self.config.f0_method if self.config.use_f0 else "none",
+                index_rate=0.0,
+                voice_gate_mode="off",
+                use_feature_cache=False,
+            )
+            t = np.arange(warmup_samples) / self.config.input_sample_rate
+            warmup_audio = (0.3 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+            for _ in range(3):
+                self.pipeline.infer(
+                    warmup_audio,
+                    input_sr=self.config.input_sample_rate,
+                    pitch_shift=self.config.pitch_shift,
+                    f0_method=self.config.f0_method if self.config.use_f0 else "none",
+                    index_rate=self.config.index_rate,
+                    voice_gate_mode=self.config.voice_gate_mode,
+                    use_feature_cache=True,
+                )
+            logger.info("Warmup complete")
+        except Exception as e:
+            logger.warning(f"Warmup failed: {e}")
+
         # Buffers - w-okada style processing with lookahead
         # - Chunk structure: [left_context | main | right_context]
         # - context_samples = kept for next chunk's left context
@@ -169,16 +209,14 @@ class RealtimeVoiceChanger:
             self.config.output_sample_rate * self.config.crossfade_sec
         )
         # Extra discard: additional samples to remove from edges
-        self.output_extra_samples = int(
-            self.config.output_sample_rate * self.config.extra_sec
-        )
+        self.output_extra_samples = int(self.config.output_sample_rate * self.config.extra_sec)
         # Context at output rate: this is discarded from output
-        self.output_context_samples = int(
-            self.config.output_sample_rate * self.config.context_sec
-        )
+        self.output_context_samples = int(self.config.output_sample_rate * self.config.context_sec)
         # Max buffer = prebuffer + margin (configurable for latency/stability tradeoff)
         # Tighter buffer = lower latency, but may cause underruns if inference is slow
-        max_latency_sec = self.config.chunk_sec * (self.config.prebuffer_chunks + self.config.buffer_margin)
+        max_latency_sec = self.config.chunk_sec * (
+            self.config.prebuffer_chunks + self.config.buffer_margin
+        )
         self.output_buffer = OutputBuffer(
             max_latency_samples=int(self.config.output_sample_rate * max_latency_sec),
             fade_samples=256,
@@ -251,12 +289,8 @@ class RealtimeVoiceChanger:
         self.output_crossfade_samples = int(
             self.config.output_sample_rate * self.config.crossfade_sec
         )
-        self.output_extra_samples = int(
-            self.config.output_sample_rate * self.config.extra_sec
-        )
-        self.output_context_samples = int(
-            self.config.output_sample_rate * self.config.context_sec
-        )
+        self.output_extra_samples = int(self.config.output_sample_rate * self.config.extra_sec)
+        self.output_context_samples = int(self.config.output_sample_rate * self.config.context_sec)
 
         # Crossfade windows
         if self.output_crossfade_samples > 0:
@@ -287,18 +321,18 @@ class RealtimeVoiceChanger:
         out_len = len(output)
         if out_len >= self._output_history_size:
             # Output larger than buffer - just store the last part
-            self._output_history[:] = output[-self._output_history_size:]
+            self._output_history[:] = output[-self._output_history_size :]
             self._output_history_pos = 0
         else:
             # Fit into circular buffer
             end_pos = self._output_history_pos + out_len
             if end_pos <= self._output_history_size:
-                self._output_history[self._output_history_pos:end_pos] = output
+                self._output_history[self._output_history_pos : end_pos] = output
             else:
                 # Wrap around
                 first_part = self._output_history_size - self._output_history_pos
-                self._output_history[self._output_history_pos:] = output[:first_part]
-                self._output_history[:out_len - first_part] = output[first_part:]
+                self._output_history[self._output_history_pos :] = output[:first_part]
+                self._output_history[: out_len - first_part] = output[first_part:]
             self._output_history_pos = end_pos % self._output_history_size
 
     def _check_feedback(self, input_audio: np.ndarray) -> float:
@@ -337,7 +371,7 @@ class RealtimeVoiceChanger:
         try:
             # Use a subset of output history for speed
             check_len = min(len(input_audio), self.config.mic_sample_rate // 2)
-            corr = np.correlate(input_norm[:check_len], output_norm[:check_len], mode='valid')
+            corr = np.correlate(input_norm[:check_len], output_norm[:check_len], mode="valid")
             max_corr = np.max(np.abs(corr)) / check_len
             return float(max_corr)
         except Exception:
@@ -413,7 +447,9 @@ class RealtimeVoiceChanger:
         if not self._output_started:
             if self._chunks_ready >= self._prebuffer_chunks:
                 self._output_started = True
-                logger.info(f"Pre-buffering complete, starting output ({self.output_buffer.available} samples)")
+                logger.info(
+                    f"Pre-buffering complete, starting output ({self.output_buffer.available} samples)"
+                )
             else:
                 # Return silence while pre-buffering
                 return np.zeros(frames, dtype=np.float32)
@@ -500,9 +536,7 @@ class RealtimeVoiceChanger:
                 # Apply noise cancellation if enabled
                 if self.config.denoise_enabled:
                     if self.stats.frames_processed < 3:
-                        logger.info(
-                            f"Applying denoise (method={self.config.denoise_method})"
-                        )
+                        logger.info(f"Applying denoise (method={self.config.denoise_method})")
                     chunk = denoise_audio(
                         chunk,
                         sample_rate=self.config.input_sample_rate,
@@ -534,6 +568,21 @@ class RealtimeVoiceChanger:
                         self.pipeline.sample_rate,
                         self.config.output_sample_rate,
                     )
+
+                # Trim context from output to get only the "main" portion
+                # This is critical for matching batch processing output length
+                # Skip trimming for first chunk (no left context)
+                if self.stats.frames_processed > 0 and self.config.context_sec > 0:
+                    context_samples_output = int(
+                        self.config.output_sample_rate * self.config.context_sec
+                    )
+                    if len(output) > context_samples_output:
+                        output = output[context_samples_output:]
+                        # Log trimming for first few chunks
+                        if self.stats.frames_processed < 5:
+                            logger.info(
+                                f"[TRIM] Chunk #{self.stats.frames_processed}: trimmed {context_samples_output} samples from start"
+                            )
 
                 # Soft clipping to prevent harsh distortion
                 max_val = np.max(np.abs(output))
@@ -567,9 +616,12 @@ class RealtimeVoiceChanger:
                 self._store_output_history(output)
 
                 # Check for feedback periodically
-                if self.stats.frames_processed > 0 and self.stats.frames_processed % self._feedback_check_interval == 0:
+                if (
+                    self.stats.frames_processed > 0
+                    and self.stats.frames_processed % self._feedback_check_interval == 0
+                ):
                     # Get raw input chunk for comparison (at mic rate)
-                    raw_input = chunk_at_mic_rate if 'chunk_at_mic_rate' in locals() else chunk
+                    raw_input = chunk_at_mic_rate if "chunk_at_mic_rate" in locals() else chunk
                     correlation = self._check_feedback(raw_input)
                     self.stats.feedback_correlation = correlation
 
@@ -598,6 +650,7 @@ class RealtimeVoiceChanger:
                         f"[INFER] Chunk #{self.stats.frames_processed}: "
                         f"in={len(chunk)}, out={len(output)}, "
                         f"infer={self.stats.inference_ms:.0f}ms, "
+                        f"f0_method={self.config.f0_method}, "
                         f"latency={self.stats.latency_ms:.0f}ms, "
                         f"buf={self.output_buffer.available}, "
                         f"under={self.stats.buffer_underruns}, over={self.stats.buffer_overruns}"
@@ -607,8 +660,7 @@ class RealtimeVoiceChanger:
                 self.stats.latency_ms = (
                     self.config.chunk_sec * 1000
                     + self.stats.inference_ms
-                    + (self.output_buffer.available / self.config.output_sample_rate)
-                    * 1000
+                    + (self.output_buffer.available / self.config.output_sample_rate) * 1000
                 )
 
                 # Send to output (block briefly if queue is full)
@@ -629,7 +681,11 @@ class RealtimeVoiceChanger:
                 logger.error(f"Inference error: {error_msg}")
 
                 # Provide helpful error message for common issues
-                if "Output size is too small" in error_msg or "size" in error_msg.lower() and "0" in error_msg:
+                if (
+                    "Output size is too small" in error_msg
+                    or "size" in error_msg.lower()
+                    and "0" in error_msg
+                ):
                     user_msg = f"チャンクサイズが小さすぎます。バッファを350ms以上に設定してください。(技術詳細: {error_msg})"
                 else:
                     user_msg = f"推論エラー: {error_msg}"
@@ -655,16 +711,18 @@ class RealtimeVoiceChanger:
         self.pipeline.clear_cache()
 
         # Validate chunk size based on F0 method
-        # RMVPE needs >= 320ms (32 mel frames), FCPE needs >= 100ms
+        # FCPE needs >= 100ms, RMVPE needs >= 320ms
         if self.config.use_f0:
-            if self.config.f0_method == "rmvpe":
-                min_chunk_sec = 0.32
-            else:  # fcpe or others
+            if self.config.f0_method == "fcpe":
                 min_chunk_sec = 0.10
+            elif self.config.f0_method == "rmvpe":
+                min_chunk_sec = 0.32
+            else:
+                min_chunk_sec = 0.10  # Default to FCPE requirement
 
             if self.config.chunk_sec < min_chunk_sec:
                 old_chunk = self.config.chunk_sec
-                self.config.chunk_sec = min_chunk_sec + 0.02  # Add small margin
+                self.config.chunk_sec = min_chunk_sec + 0.03  # Add small margin
                 logger.warning(
                     f"Chunk size {old_chunk}s too small for {self.config.f0_method}, "
                     f"increased to {self.config.chunk_sec}s"
@@ -673,56 +731,7 @@ class RealtimeVoiceChanger:
         # Recalculate buffer sizes
         self._recalculate_buffers()
 
-        # Ensure pipeline is loaded
-        if not self.pipeline._loaded:
-            self.pipeline.load()
-
-        # Warmup inference to avoid long first-chunk delay
-        # XPU/CUDA needs warmup for kernel compilation
-        # Run multiple warmups to cover all code paths (silence, voice, index)
-        logger.info("Warming up inference pipeline...")
-        # Calculate actual input size after resample from mic rate
-        # ChunkBuffer returns: chunk_samples + context_samples + lookahead_samples
-        # where chunk_samples = mic_chunk (after fix)
-        # So total = mic_chunk + mic_context + mic_lookahead
-        mic_total = (self.mic_chunk_samples + self.mic_context_samples +
-                     self.mic_lookahead_samples)
-        warmup_samples = int(mic_total * self.config.input_sample_rate /
-                            self.config.mic_sample_rate)
-
-        # Warmup 1: silence (basic path)
-        warmup_audio = np.zeros(warmup_samples, dtype=np.float32)
-        try:
-            _ = self.pipeline.infer(
-                warmup_audio,
-                input_sr=self.config.input_sample_rate,
-                pitch_shift=0,
-                f0_method=self.config.f0_method if self.config.use_f0 else "none",
-                index_rate=0.0,
-                voice_gate_mode="off",
-                use_feature_cache=False,
-            )
-        except Exception as e:
-            logger.warning(f"Warmup 1 failed: {e}")
-
-        # Warmup 2-4: synthetic tone (voice path with index)
-        # Multiple warmups needed for XPU kernel compilation on different code paths
-        t = np.arange(warmup_samples) / self.config.input_sample_rate
-        warmup_audio = (0.3 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
-        for i in range(3):
-            try:
-                _ = self.pipeline.infer(
-                    warmup_audio,
-                    input_sr=self.config.input_sample_rate,
-                    pitch_shift=self.config.pitch_shift,
-                    f0_method=self.config.f0_method if self.config.use_f0 else "none",
-                    index_rate=self.config.index_rate,
-                    voice_gate_mode=self.config.voice_gate_mode,
-                    use_feature_cache=True,
-                )
-            except Exception as e:
-                logger.warning(f"Warmup {i+2} failed: {e}")
-        logger.info("Warmup complete")
+        # Pipeline already loaded and warmed up in __init__, no need to do it again
 
         # Reset stats and buffers
         self.stats.reset()
@@ -944,7 +953,9 @@ class RealtimeVoiceChanger:
 
         # Apply immediately if running
         if self._running:
-            self.mic_lookahead_samples = int(self.config.mic_sample_rate * self.config.lookahead_sec)
+            self.mic_lookahead_samples = int(
+                self.config.mic_sample_rate * self.config.lookahead_sec
+            )
             # Recreate input buffer with new lookahead
             self.input_buffer = ChunkBuffer(
                 self.mic_chunk_samples,
@@ -952,7 +963,9 @@ class RealtimeVoiceChanger:
                 context_samples=self.mic_context_samples,
                 lookahead_samples=self.mic_lookahead_samples,
             )
-            logger.info(f"Lookahead applied: {self.config.lookahead_sec}s (+{int(self.config.lookahead_sec*1000)}ms latency)")
+            logger.info(
+                f"Lookahead applied: {self.config.lookahead_sec}s (+{int(self.config.lookahead_sec * 1000)}ms latency)"
+            )
 
     def set_sola(self, enabled: bool) -> None:
         """Set SOLA (Synchronized Overlap-Add) for optimal crossfade position.
@@ -995,7 +1008,225 @@ class RealtimeVoiceChanger:
 
         logger.info(f"Crossfade set to {self.config.crossfade_sec}s")
 
+    def set_prebuffer_chunks(self, chunks: int) -> None:
+        """Set pre-buffer chunk count.
+
+        Args:
+            chunks: Number of chunks to buffer before starting playback (0-3)
+        """
+        self.config.prebuffer_chunks = max(0, min(3, int(chunks)))
+
+        # Apply immediately if running
+        if self._running:
+            self._prebuffer_chunks = self.config.prebuffer_chunks
+            # If we increase prebuffer while running, reset output start
+            if not self._output_started and self._chunks_ready < self._prebuffer_chunks:
+                self._output_started = False
+
+        logger.info(f"Pre-buffer chunks set to {self.config.prebuffer_chunks}")
+
+    def set_buffer_margin(self, margin: float) -> None:
+        """Set output buffer margin multiplier.
+
+        Args:
+            margin: Buffer margin multiplier (0.3-2.0)
+        """
+        self.config.buffer_margin = max(0.3, min(2.0, margin))
+
+        # Apply immediately if running
+        if self._running:
+            max_latency_sec = self.config.chunk_sec * (
+                self.config.prebuffer_chunks + self.config.buffer_margin
+            )
+            max_latency_samples = int(self.config.output_sample_rate * max_latency_sec)
+            self.output_buffer.set_max_latency(max_latency_samples)
+
+        logger.info(f"Buffer margin set to {self.config.buffer_margin}x")
+
+    def set_chunk_sec(self, chunk_sec: float) -> None:
+        """Set chunk size in seconds.
+
+        Automatically restarts audio streams if running.
+
+        Args:
+            chunk_sec: Chunk duration in seconds (0.1-0.6)
+        """
+        old_chunk = self.config.chunk_sec
+        self.config.chunk_sec = max(0.1, min(0.6, chunk_sec))
+
+        if self._running:
+            logger.info(
+                f"Chunk size changed ({old_chunk}s -> {self.config.chunk_sec}s), "
+                "restarting audio streams..."
+            )
+            # Restart audio streams to apply new chunk size
+            self.stop()
+            self.start()
+        else:
+            logger.info(f"Chunk size set to {self.config.chunk_sec}s")
+
     @property
     def is_running(self) -> bool:
         """Check if voice changer is running."""
         return self._running
+
+    # ========== Public Testing Methods ==========
+
+    def process_input_chunk(self, audio: np.ndarray) -> None:
+        """
+        Add input audio and queue available chunks for processing.
+
+        This is a public method for testing that replicates the behavior
+        of _on_audio_input without requiring an actual audio stream.
+
+        Args:
+            audio: Input audio at mic_sample_rate
+        """
+        # Add raw audio to buffer
+        self.input_buffer.add_input(audio)
+
+        # Queue all available chunks
+        while self.input_buffer.has_chunk():
+            chunk = self.input_buffer.get_chunk()
+            if chunk is not None:
+                try:
+                    self._input_queue.put_nowait(chunk)
+                except Exception:
+                    logger.warning("Input queue full, dropping chunk")
+                    break
+
+    def process_next_chunk(self) -> bool:
+        """
+        Process one chunk from input queue to output queue.
+
+        This is a public method for testing that replicates one iteration
+        of _inference_thread without running in a separate thread.
+
+        Returns:
+            True if a chunk was processed, False if queue was empty
+        """
+        try:
+            # Get input chunk (at mic sample rate) - non-blocking
+            chunk = self._input_queue.get_nowait()
+        except Empty:
+            return False
+
+        # Apply input gain
+        if self.config.input_gain_db != 0.0:
+            gain_linear = 10 ** (self.config.input_gain_db / 20)
+            chunk = chunk * gain_linear
+
+        # Store for feedback detection (optional in tests)
+        chunk_at_mic_rate = chunk.copy()
+
+        # Resample from mic rate to processing rate
+        if self.config.mic_sample_rate != self.config.input_sample_rate:
+            chunk = resample(
+                chunk,
+                self.config.mic_sample_rate,
+                self.config.input_sample_rate,
+            )
+
+        # Apply noise cancellation if enabled
+        if self.config.denoise_enabled:
+            chunk = denoise_audio(
+                chunk,
+                sample_rate=self.config.input_sample_rate,
+                method=self.config.denoise_method,
+                device="cpu",
+            )
+
+        # Run inference
+        output = self.pipeline.infer(
+            chunk,
+            input_sr=self.config.input_sample_rate,
+            pitch_shift=self.config.pitch_shift,
+            f0_method=self.config.f0_method if self.config.use_f0 else "none",
+            index_rate=self.config.index_rate,
+            voice_gate_mode=self.config.voice_gate_mode,
+            energy_threshold=self.config.energy_threshold,
+            use_feature_cache=self.config.use_feature_cache,
+        )
+
+        # Resample to output sample rate
+        if self.pipeline.sample_rate != self.config.output_sample_rate:
+            output = resample(
+                output,
+                self.pipeline.sample_rate,
+                self.config.output_sample_rate,
+            )
+
+        # Trim context from output to get only the "main" portion
+        # This is critical for matching batch processing output length
+        # Skip trimming for first chunk (no left context)
+        if self.stats.frames_processed > 0 and self.config.context_sec > 0:
+            context_samples_output = int(self.config.output_sample_rate * self.config.context_sec)
+            if len(output) > context_samples_output:
+                output = output[context_samples_output:]
+                # Log trimming for first few chunks
+                if self.stats.frames_processed < 5:
+                    logger.info(
+                        f"[TRIM] Chunk #{self.stats.frames_processed}: trimmed {context_samples_output} samples from start"
+                    )
+
+        # Soft clipping
+        max_val = np.max(np.abs(output))
+        if max_val > 1.0:
+            output = np.tanh(output)
+
+        # Apply SOLA crossfade if enabled
+        if self.config.use_sola and self._sola_state is not None:
+            cf_result = apply_sola_crossfade(output, self._sola_state)
+            output = cf_result.audio
+
+        # Store output history for feedback detection
+        self._store_output_history(output)
+
+        # Update stats
+        self.stats.frames_processed += 1
+
+        # Send to output queue
+        try:
+            self._output_queue.put_nowait(output)
+        except Exception:
+            logger.warning("Output queue full, dropping chunk")
+
+        return True
+
+    def get_output_chunk(self, frames: int) -> np.ndarray:
+        """
+        Get output audio from buffer.
+
+        This is a public method for testing that replicates the behavior
+        of _on_audio_output without requiring an actual audio stream.
+
+        Args:
+            frames: Number of samples to retrieve
+
+        Returns:
+            Output audio at output_sample_rate
+        """
+        # Check for new processed audio in queue
+        try:
+            while True:
+                audio = self._output_queue.get_nowait()
+                self.output_buffer.add(audio)
+                self._chunks_ready += 1
+        except Empty:
+            pass
+
+        # Check pre-buffering
+        if not self._output_started:
+            if self._chunks_ready >= self._prebuffer_chunks:
+                self._output_started = True
+            else:
+                # Return silence while pre-buffering
+                return np.zeros(frames, dtype=np.float32)
+
+        # Get output samples
+        output = self.output_buffer.get(frames)
+
+        if self.output_buffer.available == 0:
+            self.stats.buffer_underruns += 1
+
+        return output

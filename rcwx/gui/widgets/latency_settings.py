@@ -99,11 +99,11 @@ class LatencySettingsFrame(ctk.CTkFrame):
             text="レイテンシ設定",
             font=ctk.CTkFont(size=14, weight="bold"),
         )
-        header.grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 5))
+        header.grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(5, 2))
 
         # Mode selection (radio buttons)
         self.mode_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.mode_frame.grid(row=1, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
+        self.mode_frame.grid(row=1, column=0, columnspan=2, padx=10, pady=2, sticky="ew")
 
         self.mode_var = ctk.StringVar(value="balanced")
 
@@ -125,7 +125,7 @@ class LatencySettingsFrame(ctk.CTkFrame):
             variable=self.advanced_var,
             command=self._toggle_advanced,
         )
-        self.advanced_toggle.grid(row=2, column=0, columnspan=2, padx=10, pady=(10, 5), sticky="w")
+        self.advanced_toggle.grid(row=2, column=0, columnspan=2, padx=10, pady=(5, 3), sticky="w")
 
         # Advanced settings frame (hidden by default)
         self.advanced_frame = ctk.CTkFrame(self)
@@ -149,10 +149,10 @@ class LatencySettingsFrame(ctk.CTkFrame):
     ) -> tuple[ctk.CTkSlider, ctk.CTkLabel]:
         """Create a labeled slider row. Returns (slider, value_label)."""
         ctk.CTkLabel(parent, text=label, font=ctk.CTkFont(size=11)).grid(
-            row=row, column=0, padx=10, pady=(10, 0), sticky="w"
+            row=row, column=0, padx=10, pady=(5, 0), sticky="w"
         )
         frame = ctk.CTkFrame(parent, fg_color="transparent")
-        frame.grid(row=row + 1, column=0, padx=10, pady=2, sticky="ew")
+        frame.grid(row=row + 1, column=0, padx=10, pady=(0, 2), sticky="ew")
 
         slider = ctk.CTkSlider(frame, from_=from_, to=to, number_of_steps=steps, width=180, command=command)
         slider.set(value)
@@ -200,7 +200,7 @@ class LatencySettingsFrame(ctk.CTkFrame):
             variable=self.sola_var,
             command=self._on_sola_change,
         )
-        self.sola_checkbox.grid(row=12, column=0, padx=10, pady=(10, 5), sticky="w")
+        self.sola_checkbox.grid(row=12, column=0, padx=10, pady=(5, 3), sticky="w")
 
         # Estimated latency display
         self.estimate_label = ctk.CTkLabel(
@@ -209,7 +209,7 @@ class LatencySettingsFrame(ctk.CTkFrame):
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color="#66b3ff",
         )
-        self.estimate_label.grid(row=13, column=0, padx=10, pady=(10, 10), sticky="w")
+        self.estimate_label.grid(row=13, column=0, padx=10, pady=(5, 5), sticky="w")
 
         frame.grid_columnconfigure(0, weight=1)
         self._update_estimate()
@@ -217,7 +217,7 @@ class LatencySettingsFrame(ctk.CTkFrame):
     def _toggle_advanced(self) -> None:
         """Toggle advanced settings visibility."""
         if self.advanced_var.get():
-            self.advanced_frame.grid(row=3, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
+            self.advanced_frame.grid(row=3, column=0, columnspan=2, padx=10, pady=(0, 3), sticky="ew")
         else:
             self.advanced_frame.grid_forget()
 

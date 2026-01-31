@@ -176,64 +176,6 @@ class MLDenoiser:
         return enhanced_np
 
 
-class RealtimeMLDenoiser:
-    """Streaming wrapper for Facebook Denoiser.
-
-    Buffers audio and processes in chunks for real-time use.
-    """
-
-    def __init__(
-        self,
-        sample_rate: int = 16000,
-        chunk_samples: int = 4800,  # 300ms at 16kHz
-        device: str = "cpu",
-    ):
-        """Initialize streaming denoiser.
-
-        Args:
-            sample_rate: Input/output sample rate
-            chunk_samples: Processing chunk size in samples
-            device: Device to run on
-        """
-        self.sample_rate = sample_rate
-        self.chunk_samples = chunk_samples
-        self.device = device
-
-        self._denoiser = MLDenoiser(device)
-        self._buffer = np.array([], dtype=np.float32)
-
-    def reset(self):
-        """Reset internal buffer."""
-        self._buffer = np.array([], dtype=np.float32)
-
-    def process(self, audio: NDArray[np.float32]) -> NDArray[np.float32]:
-        """Process audio chunk.
-
-        Args:
-            audio: Input audio chunk
-
-        Returns:
-            Denoised audio (may have different length due to buffering)
-        """
-        # Add to buffer
-        self._buffer = np.concatenate([self._buffer, audio])
-
-        output_chunks = []
-
-        # Process full chunks
-        while len(self._buffer) >= self.chunk_samples:
-            chunk = self._buffer[:self.chunk_samples]
-            self._buffer = self._buffer[self.chunk_samples:]
-
-            enhanced = self._denoiser.process(chunk, self.sample_rate)
-            output_chunks.append(enhanced)
-
-        if output_chunks:
-            return np.concatenate(output_chunks)
-        else:
-            return np.array([], dtype=np.float32)
-
-
 # =============================================================================
 # Spectral Gate Denoiser (Traditional DSP fallback)
 # =============================================================================
@@ -477,114 +419,6 @@ class SpectralGateDenoiser:
         return output
 
 
-class RealtimeDenoiser:
-    """Streaming denoiser for real-time processing.
-
-    Handles arbitrary chunk sizes with internal buffering and proper overlap-add.
-
-    Usage:
-        denoiser = RealtimeDenoiser(sample_rate=16000)
-        denoiser.learn_noise(noise_reference)
-
-        while running:
-            chunk = get_audio_chunk()  # Any size
-            clean = denoiser.process(chunk)
-            play_audio(clean)
-    """
-
-    def __init__(
-        self,
-        sample_rate: int = 16000,
-        config: Optional[DenoiseConfig] = None,
-    ):
-        self.denoiser = SpectralGateDenoiser(sample_rate, config)
-        self.hop_length = self.denoiser.hop_length
-        self.n_fft = self.denoiser.n_fft
-        self.window = self.denoiser.window
-
-        # Input buffer: accumulates samples until we have enough for a frame
-        self.input_buffer = np.zeros(self.n_fft, dtype=np.float32)
-        self.input_pos = 0  # Write position in input buffer
-
-        # Output overlap buffer: holds overlapping output frames
-        self.output_buffer = np.zeros(self.n_fft, dtype=np.float32)
-        self.window_sum = np.zeros(self.n_fft, dtype=np.float32)
-
-        # Initial fill required before we can output
-        self.warmup_samples = self.n_fft - self.hop_length
-        self.samples_accumulated = 0
-
-    def learn_noise(self, noise_audio: NDArray[np.float32]) -> None:
-        """Learn noise profile from reference audio."""
-        self.denoiser.learn_noise(noise_audio)
-
-    def enable_auto_learn(self, enabled: bool = True) -> None:
-        """Enable automatic noise learning."""
-        self.denoiser.enable_auto_learn(enabled)
-
-    def reset(self) -> None:
-        """Reset all internal state."""
-        self.denoiser.reset()
-        self.input_buffer.fill(0)
-        self.input_pos = 0
-        self.output_buffer.fill(0)
-        self.window_sum.fill(0)
-        self.samples_accumulated = 0
-
-    def process(self, audio: NDArray[np.float32]) -> NDArray[np.float32]:
-        """Process audio chunk (any size).
-
-        Args:
-            audio: Input audio chunk
-
-        Returns:
-            Denoised audio (same length as input after warmup)
-        """
-        if len(audio) == 0:
-            return audio
-
-        output_list = []
-
-        for sample in audio:
-            # Shift input buffer and add new sample
-            if self.input_pos < self.n_fft:
-                self.input_buffer[self.input_pos] = sample
-                self.input_pos += 1
-            else:
-                # Shift buffer left by hop_length and add new samples
-                self.input_buffer[:-1] = self.input_buffer[1:]
-                self.input_buffer[-1] = sample
-
-            self.samples_accumulated += 1
-
-            # Check if we can process a frame
-            if self.samples_accumulated >= self.n_fft and \
-               (self.samples_accumulated - self.n_fft) % self.hop_length == 0:
-
-                # Process the current frame
-                frame = self.input_buffer.copy()
-                processed = self.denoiser.process_frame(frame)
-
-                # Overlap-add to output buffer
-                self.output_buffer += processed
-                self.window_sum += self.window ** 2  # Effective Hann window
-
-                # Output hop_length samples
-                for i in range(self.hop_length):
-                    if self.window_sum[i] > 1e-8:
-                        output_list.append(self.output_buffer[i] / self.window_sum[i])
-                    else:
-                        output_list.append(0.0)
-
-                # Shift output buffer
-                self.output_buffer[:-self.hop_length] = self.output_buffer[self.hop_length:]
-                self.output_buffer[-self.hop_length:] = 0
-                self.window_sum[:-self.hop_length] = self.window_sum[self.hop_length:]
-                self.window_sum[-self.hop_length:] = 0
-
-        return np.array(output_list, dtype=np.float32)
-
-
 # Global cache for MLDenoiser (avoid reloading model every call)
 _ml_denoiser_cache: Optional[MLDenoiser] = None
 
@@ -661,5 +495,18 @@ def is_ml_denoiser_available() -> bool:
         return False
 
 
-# Alias for backwards compatibility
-is_deepfilter_available = is_ml_denoiser_available
+# Backwards compatibility alias (deprecated)
+def is_deepfilter_available() -> bool:
+    """Check if ML denoiser is available.
+
+    .. deprecated::
+        Use :func:`is_ml_denoiser_available` instead.
+        This alias will be removed in a future version.
+    """
+    import warnings
+    warnings.warn(
+        "is_deepfilter_available() is deprecated, use is_ml_denoiser_available() instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return is_ml_denoiser_available()

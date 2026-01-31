@@ -43,7 +43,7 @@ class ModelSelector(ctk.CTkFrame):
             text="モデル選択",
             font=ctk.CTkFont(size=14, weight="bold"),
         )
-        self.title_label.grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 5))
+        self.title_label.grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(5, 2))
 
         # Model dropdown
         self.model_var = ctk.StringVar(value="モデルを選択...")
@@ -55,7 +55,7 @@ class ModelSelector(ctk.CTkFrame):
             state="readonly",
             command=self._on_dropdown_change,
         )
-        self.model_dropdown.grid(row=1, column=0, padx=10, pady=5, sticky="ew")
+        self.model_dropdown.grid(row=1, column=0, padx=10, pady=2, sticky="ew")
 
         # Browse button
         self.browse_btn = ctk.CTkButton(
@@ -64,7 +64,7 @@ class ModelSelector(ctk.CTkFrame):
             width=80,
             command=self._browse_model,
         )
-        self.browse_btn.grid(row=1, column=1, padx=10, pady=5)
+        self.browse_btn.grid(row=1, column=1, padx=10, pady=2)
 
         # Status label
         self.status_label = ctk.CTkLabel(
@@ -73,7 +73,7 @@ class ModelSelector(ctk.CTkFrame):
             font=ctk.CTkFont(size=12),
             text_color="gray",
         )
-        self.status_label.grid(row=2, column=0, columnspan=2, sticky="w", padx=10, pady=(5, 10))
+        self.status_label.grid(row=2, column=0, columnspan=2, sticky="w", padx=10, pady=(2, 5))
 
         # Configure grid
         self.grid_columnconfigure(0, weight=1)

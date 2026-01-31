@@ -51,9 +51,9 @@ def test_hubert_feature_shape():
         print("Skipping: HuBERT not found")
         return
 
-    from rcwx.models.hubert import HuBERTFeatureExtractor
+    from rcwx.models.hubert_loader import HuBERTLoader
 
-    hubert = HuBERTFeatureExtractor(str(hubert_path), device="cpu")
+    hubert = HuBERTLoader(str(hubert_path), device="cpu")
 
     audio = torch.randn(1, 16000)  # 1 second at 16kHz
     features = hubert.extract(audio)

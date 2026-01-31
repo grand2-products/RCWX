@@ -140,6 +140,15 @@ wheels = [
 ]
 
 [[package]]
+name = "einops"
+version = "0.8.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/2c/77/850bef8d72ffb9219f0b1aac23fbc1bf7d038ee6ea666f331fa273031aa2/einops-0.8.2.tar.gz", hash = "sha256:609da665570e5e265e27283aab09e7f279ade90c4f01bcfca111f3d3e13f2827", size = 56261, upload-time = "2026-01-26T04:13:17.638Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2a/09/f8d8f8f31e4483c10a906437b4ce31bdf3d6d417b73fe33f1a8b59e34228/einops-0.8.2-py3-none-any.whl", hash = "sha256:54058201ac7087911181bfec4af6091bb59380360f069276601256a76af08193", size = 65638, upload-time = "2026-01-26T04:13:18.546Z" },
+]
+
+[[package]]
 name = "faiss-cpu"
 version = "1.13.2"
 source = { registry = "https://pypi.org/simple" }
@@ -265,6 +274,19 @@ wheels = [
 ]
 
 [[package]]
+name = "hyper-connections"
+version = "0.4.7"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "einops", marker = "sys_platform == 'win32'" },
+    { name = "torch", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f6/d8/4bcdf7b92af79cbe5a6f174c467106629df80fa560de2bd20d5ebe1d95d0/hyper_connections-0.4.7.tar.gz", hash = "sha256:31bba8bb9846b171bfe1544eddac3bf8b55c507117d283c6139727c3dbb815ee", size = 296929, upload-time = "2026-01-18T18:15:14.398Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d2/17/2f1a4e249fe748026180540f2e9c661dae7ccf537ca42c450b62f637e501/hyper_connections-0.4.7-py3-none-any.whl", hash = "sha256:96af6ab78ee32a13fb081654edc25de328dc7717c03bcee06422b26e936d0aab", size = 28652, upload-time = "2026-01-18T18:15:13.476Z" },
+]
+
+[[package]]
 name = "idna"
 version = "3.11"
 source = { registry = "https://pypi.org/simple" }
@@ -373,6 +395,20 @@ dependencies = [
     { name = "torch", marker = "sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a1/19/c9e1596b5572c786b93428d0904280e964c930fae7e6c9368ed9e1b63922/julius-0.2.7.tar.gz", hash = "sha256:3c0f5f5306d7d6016fcc95196b274cae6f07e2c9596eed314e4e7641554fbb08", size = 59640, upload-time = "2022-09-19T16:13:34.2Z" }
+
+[[package]]
+name = "local-attention"
+version = "1.11.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "einops", marker = "sys_platform == 'win32'" },
+    { name = "hyper-connections", marker = "sys_platform == 'win32'" },
+    { name = "torch", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9b/b4/7cc5b3122ff63d58c7dd58cb122edfc8f5c74c88b14fcd22b444f0527952/local_attention-1.11.2.tar.gz", hash = "sha256:94e48fec748e96fa81ac6c3e27a357950eaab22cd8f69a10c50b23d6eec8f09c", size = 10918, upload-time = "2025-07-16T14:30:37.094Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d8/f6/074ef5c98f2d062177af24a9e20db20b009d141e4ca827c1e419461595b0/local_attention-1.11.2-py3-none-any.whl", hash = "sha256:8bbb03cef6a6f0b694de64f9ecd81886fd1e73ef367b57f02995b469ac52fd16", size = 9504, upload-time = "2025-07-16T14:30:35.9Z" },
+]
 
 [[package]]
 name = "markupsafe"
@@ -622,6 +658,9 @@ dev = [
     { name = "pytest", marker = "sys_platform == 'win32'" },
     { name = "ruff", marker = "sys_platform == 'win32'" },
 ]
+lowlatency = [
+    { name = "torchfcpe", marker = "sys_platform == 'win32'" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -636,9 +675,10 @@ requires-dist = [
     { name = "sounddevice", specifier = ">=0.4.6" },
     { name = "torch", specifier = ">=2.7", index = "https://download.pytorch.org/whl/xpu" },
     { name = "torchaudio", specifier = ">=2.7", index = "https://download.pytorch.org/whl/xpu" },
+    { name = "torchfcpe", marker = "extra == 'lowlatency'", specifier = ">=0.0.1" },
     { name = "transformers", specifier = ">=4.36" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "lowlatency"]
 
 [[package]]
 name = "regex"
@@ -823,6 +863,21 @@ dependencies = [
 wheels = [
     { url = "https://download.pytorch.org/whl/xpu/torchaudio-2.10.0%2Bxpu-cp311-cp311-win_amd64.whl", hash = "sha256:79745c6ab1b813aed967116777354088222388d4f1ec977dbe42abf233843643" },
     { url = "https://download.pytorch.org/whl/xpu/torchaudio-2.10.0%2Bxpu-cp312-cp312-win_amd64.whl", hash = "sha256:20bce60dd3d77802ce6fefdc6a7c2468b3d5b464599535c65d91972ad24c66b7" },
+]
+
+[[package]]
+name = "torchfcpe"
+version = "0.0.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "einops", marker = "sys_platform == 'win32'" },
+    { name = "local-attention", marker = "sys_platform == 'win32'" },
+    { name = "numpy", marker = "sys_platform == 'win32'" },
+    { name = "torch", marker = "sys_platform == 'win32'" },
+    { name = "torchaudio", marker = "sys_platform == 'win32'" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/15/98/66da447498a2835b01cb3ae851e1333035a9fbf228e5c6f3e3c4351c06b6/torchfcpe-0.0.4-py3-none-any.whl", hash = "sha256:f042c463d850d76c6f4899a0b84f0b694bb560adf05f4de951097a756d17472d", size = 40222012, upload-time = "2024-03-06T20:03:43.685Z" },
 ]
 
 [[package]]

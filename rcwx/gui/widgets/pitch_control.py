@@ -41,11 +41,11 @@ class PitchControl(ctk.CTkFrame):
             text="ピッチシフト",
             font=ctk.CTkFont(size=14, weight="bold"),
         )
-        self.pitch_label.grid(row=0, column=0, columnspan=3, sticky="w", padx=10, pady=(10, 5))
+        self.pitch_label.grid(row=0, column=0, columnspan=3, sticky="w", padx=10, pady=(5, 2))
 
         # Slider row
         self.min_label = ctk.CTkLabel(self, text="-24", font=ctk.CTkFont(size=10))
-        self.min_label.grid(row=1, column=0, padx=(10, 5), pady=5)
+        self.min_label.grid(row=1, column=0, padx=(10, 5), pady=2)
 
         self.pitch_slider = ctk.CTkSlider(
             self,
@@ -56,10 +56,10 @@ class PitchControl(ctk.CTkFrame):
             command=self._on_slider_change,
         )
         self.pitch_slider.set(0)
-        self.pitch_slider.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        self.pitch_slider.grid(row=1, column=1, padx=5, pady=2, sticky="ew")
 
         self.max_label = ctk.CTkLabel(self, text="+24", font=ctk.CTkFont(size=10))
-        self.max_label.grid(row=1, column=2, padx=(5, 10), pady=5)
+        self.max_label.grid(row=1, column=2, padx=(5, 10), pady=2)
 
         # Current value display
         self.value_label = ctk.CTkLabel(
@@ -67,11 +67,11 @@ class PitchControl(ctk.CTkFrame):
             text="現在値: 0 半音",
             font=ctk.CTkFont(size=12),
         )
-        self.value_label.grid(row=2, column=0, columnspan=3, sticky="w", padx=10, pady=5)
+        self.value_label.grid(row=2, column=0, columnspan=3, sticky="w", padx=10, pady=2)
 
         # Preset buttons
         self.preset_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.preset_frame.grid(row=3, column=0, columnspan=3, padx=10, pady=5, sticky="ew")
+        self.preset_frame.grid(row=3, column=0, columnspan=3, padx=10, pady=(2, 5), sticky="ew")
 
         presets = [
             ("-12", -12),
@@ -88,7 +88,7 @@ class PitchControl(ctk.CTkFrame):
                 width=50,
                 command=lambda v=value: self._set_pitch(v),
             )
-            btn.grid(row=0, column=i, padx=3, pady=5)
+            btn.grid(row=0, column=i, padx=3, pady=2)
 
         # F0 mode section
         self.f0_label = ctk.CTkLabel(
@@ -96,10 +96,10 @@ class PitchControl(ctk.CTkFrame):
             text="F0モード",
             font=ctk.CTkFont(size=14, weight="bold"),
         )
-        self.f0_label.grid(row=4, column=0, columnspan=3, sticky="w", padx=10, pady=(15, 5))
+        self.f0_label.grid(row=4, column=0, columnspan=3, sticky="w", padx=10, pady=(8, 2))
 
         self.f0_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.f0_frame.grid(row=5, column=0, columnspan=3, padx=10, pady=5, sticky="ew")
+        self.f0_frame.grid(row=5, column=0, columnspan=3, padx=10, pady=(0, 5), sticky="ew")
 
         self.f0_var = ctk.StringVar(value="rmvpe")
 
@@ -110,7 +110,7 @@ class PitchControl(ctk.CTkFrame):
             value="rmvpe",
             command=self._on_f0_change,
         )
-        self.rmvpe_rb.grid(row=0, column=0, padx=5, pady=5)
+        self.rmvpe_rb.grid(row=0, column=0, padx=5, pady=2)
 
         self.fcpe_rb = ctk.CTkRadioButton(
             self.f0_frame,
@@ -119,7 +119,7 @@ class PitchControl(ctk.CTkFrame):
             value="fcpe",
             command=self._on_f0_change,
         )
-        self.fcpe_rb.grid(row=0, column=1, padx=5, pady=5)
+        self.fcpe_rb.grid(row=0, column=1, padx=5, pady=2)
 
         self.none_rb = ctk.CTkRadioButton(
             self.f0_frame,
@@ -128,7 +128,7 @@ class PitchControl(ctk.CTkFrame):
             value="none",
             command=self._on_f0_change,
         )
-        self.none_rb.grid(row=0, column=2, padx=5, pady=5)
+        self.none_rb.grid(row=0, column=2, padx=5, pady=2)
 
         # Configure grid
         self.grid_columnconfigure(1, weight=1)

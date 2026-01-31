@@ -20,7 +20,7 @@ class AudioConfig:
     output_device_name: Optional[str] = None
     sample_rate: int = 16000
     output_sample_rate: int = 48000
-    chunk_sec: float = 0.35  # RMVPE requires >= 0.32 sec
+    chunk_sec: float = 0.15  # FCPE optimized (>= 0.10 sec), RMVPE needs >= 0.32 sec
     crossfade_sec: float = 0.05
     input_gain_db: float = 0.0  # Input gain in dB
     # Latency settings
@@ -45,8 +45,8 @@ class InferenceConfig:
 
     pitch_shift: int = 0  # semitones
     use_f0: bool = True
-    # F0 extraction method: "rmvpe" (accurate, 320ms min) or "fcpe" (fast, 100ms min)
-    f0_method: str = "rmvpe"
+    # F0 extraction method: "fcpe" (fast, 100ms min) or "rmvpe" (accurate, 320ms min)
+    f0_method: str = "fcpe"
     use_index: bool = False
     index_ratio: float = 0.5
     use_compile: bool = True

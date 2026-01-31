@@ -24,7 +24,7 @@ RVC Real-time Voice Changer on Intel Arc (XPU)
 ### Intel Arc GPU (XPU) の場合
 
 ```powershell
-git clone https://github.com/yourname/rcwx.git
+git clone https://github.com/grand2-products/rcwx.git
 cd rcwx
 
 # PyTorch XPU版を含む全依存関係をインストール
@@ -68,12 +68,23 @@ uv run python -c "import torch; print(torch.__version__)"
 ## Quick Start
 
 ```powershell
-# 必要モデル (HuBERT, RMVPE) のダウンロード
+# 1. 依存関係インストール
+uv sync
+
+# 2. (推奨) 低レイテンシF0抽出をインストール
+uv sync --extra lowlatency
+
+# 3. 必要モデル (HuBERT, RMVPE) のダウンロード
 uv run rcwx download
 
-# GUI起動
+# 4. GUI起動
 uv run rcwx
 ```
+
+**デフォルト設定** (低レイテンシモード):
+- F0方式: FCPE (80-120ms レイテンシ)
+- チャンクサイズ: 150ms
+- RMVPEに変更すると高品質・高レイテンシ (150-250ms)
 
 ## CLI Commands
 

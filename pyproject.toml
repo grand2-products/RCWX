@@ -22,6 +22,9 @@ dev = [
     "pytest>=7.0",
     "ruff>=0.1.0",
 ]
+lowlatency = [
+    "torchfcpe>=0.0.1",  # Fast F0 extraction for low-latency mode (100ms chunks)
+]
 
 [project.scripts]
 rcwx = "rcwx.cli:main"

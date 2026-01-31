@@ -4,8 +4,6 @@ from rcwx.audio.buffer import ChunkBuffer
 from rcwx.audio.denoise import (
     DenoiseConfig,
     MLDenoiser,
-    RealtimeDenoiser,
-    RealtimeMLDenoiser,
     SpectralGateDenoiser,
     denoise,
     is_ml_denoiser_available,
@@ -20,8 +18,6 @@ __all__ = [
     "ChunkBuffer",
     "DenoiseConfig",
     "MLDenoiser",
-    "RealtimeDenoiser",
-    "RealtimeMLDenoiser",
     "SpectralGateDenoiser",
     "denoise",
     "is_ml_denoiser_available",

@@ -46,6 +46,9 @@ class ChunkBuffer:
         # Previous chunk output for crossfading
         self._prev_output: NDArray[np.float32] | None = None
 
+        # Track if this is the first chunk (no left context for first chunk)
+        self._is_first_chunk: bool = True
+
         # Create crossfade windows
         if crossfade_samples > 0:
             self._fade_in = np.linspace(0, 1, crossfade_samples, dtype=np.float32)
@@ -65,9 +68,12 @@ class ChunkBuffer:
 
     def has_chunk(self) -> bool:
         """Check if a full chunk is available for processing."""
-        # Need: chunk_samples + context_samples + lookahead for full processing
-        # But only advance by chunk_samples, so we need lookahead available
-        required = self.chunk_samples + self.context_samples + self.lookahead_samples
+        # First chunk: no left context, only main + lookahead
+        # Subsequent chunks: left context + main + lookahead
+        if self._is_first_chunk:
+            required = self.chunk_samples + self.lookahead_samples
+        else:
+            required = self.chunk_samples + self.context_samples + self.lookahead_samples
         return len(self._input_buffer) >= required
 
     def get_chunk(self) -> NDArray[np.float32] | None:
@@ -77,17 +83,35 @@ class ChunkBuffer:
         Returns:
             Audio chunk: [left_context | main | right_context]
             Or None if not enough samples
+
+        Note:
+            First chunk has no left context: [main | right_context]
+            Subsequent chunks: [left_context | main | right_context]
         """
-        required = self.chunk_samples + self.context_samples + self.lookahead_samples
+        # Determine required samples based on whether this is first chunk
+        if self._is_first_chunk:
+            required = self.chunk_samples + self.lookahead_samples
+        else:
+            required = self.chunk_samples + self.context_samples + self.lookahead_samples
+
         if len(self._input_buffer) < required:
             return None
 
-        # Extract chunk with both contexts
-        # Structure: [left_context | main | right_context]
+        # Extract chunk
         chunk = self._input_buffer[:required].copy()
 
-        # Remove processed samples (keep context + lookahead for next chunk)
-        self._input_buffer = self._input_buffer[self.chunk_samples:]
+        # Remove processed samples
+        # Keep context samples from the END of this chunk for next chunk's left context
+        if self._is_first_chunk:
+            # First chunk: advance by (chunk_samples - context_samples)
+            # This leaves the last context_samples as left context for next chunk
+            advance = self.chunk_samples - self.context_samples
+            self._input_buffer = self._input_buffer[advance:]
+            self._is_first_chunk = False
+        else:
+            # Subsequent chunks: advance by chunk_samples
+            # This naturally keeps the overlap correct
+            self._input_buffer = self._input_buffer[self.chunk_samples:]
 
         return chunk
 
@@ -123,6 +147,7 @@ class ChunkBuffer:
         """Clear all buffers."""
         self._input_buffer = np.array([], dtype=np.float32)
         self._prev_output = None
+        self._is_first_chunk = True
 
     @property
     def buffered_samples(self) -> int:
@@ -220,3 +245,16 @@ class OutputBuffer:
     def samples_dropped(self) -> int:
         """Return total samples dropped to maintain max latency."""
         return self._samples_dropped
+
+    def set_max_latency(self, max_latency_samples: int) -> None:
+        """Update the maximum latency buffer size.
+
+        Args:
+            max_latency_samples: New maximum samples to buffer
+        """
+        self.max_latency_samples = max_latency_samples
+        # Immediately trim buffer if it exceeds new max
+        if len(self._buffer) > self.max_latency_samples:
+            dropped = len(self._buffer) - self.max_latency_samples
+            self._buffer = self._buffer[dropped:]
+            self._samples_dropped += dropped
