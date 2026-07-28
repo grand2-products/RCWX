@@ -119,11 +119,15 @@ def test_aggressive_mode_uses_20ms_deadline_policy() -> None:
     assert vc._compute_shed_threshold() == (752, 496)
     vc._observed_callback_sec = 0.0
 
+    # Switching into a deadline mode lifts the prebuffer to the documented
+    # Aggressive floor of 2 hops -- not back to whatever this session started
+    # with.  Anything above the floor is standing latency the shed policy
+    # would trim straight back out.
     vc._prebuffer_chunks = 1
     vc.config.prebuffer_chunks = 1
     vc.set_latency_mode("aggressive")
-    assert vc._prebuffer_chunks == 3
-    assert vc.config.prebuffer_chunks == 3
+    assert vc._prebuffer_chunks == 2
+    assert vc.config.prebuffer_chunks == 2
 
 
 def test_aggressive_underrun_rearms_reduced_prebuffer() -> None:
