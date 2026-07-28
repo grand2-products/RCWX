@@ -105,7 +105,7 @@ rcwx/
 │   └── infer_pack/
 ├── pipeline/
 │   ├── inference.py       # infer / infer_streaming
-│   ├── realtime_config.py # RealtimeConfig / RealtimeStats
+│   ├── realtime_config.py # RealtimeConfig / RealtimeStats / SOLA 余白計算
 │   ├── drift_control.py   # shed policy + FloorTracker
 │   └── realtime_unified.py
 └── gui/
@@ -162,8 +162,8 @@ GUI レイテンシ枠は `chunk_sec` / `latency_mode` から overlap 等を **�
 | `energy_threshold`            |    `0.2` | energy モード |
 | `overlap_sec`                 |   `0.20` | 設定デフォルト。GUI は chunk 100%（60–300ms）で上書き |
 | `crossfade_sec`               |   `0.08` | 設定デフォルト。GUI は chunk 10%（10–20ms）で上書き |
-| `use_sola`                    |   `true` | |
-| `sola_search_ms`              |   `15.0` | 70Hz 1周期+マージン。GUI 固定 15 |
+| `use_sola`                    |   `true` | `false`（または `crossfade_sec=0`）にすると SOLA 余白の生成自体を止める（余白を消費する splice が走らないため）。変更は再起動で反映 |
+| `sola_search_ms`              |   `10.0` | 100Hz 1周期。GUI 固定 10。`crossfade + search ≤ 20ms` で SOLA 余白が 10ms モデルフレーム1枚分縮む |
 | `hubert_context_sec`          |    `1.0` | Aggressive runtime は最大 0.56 に cap |
 | `f0_context_sec`              |   `0.32` | Aggressive + SwiftF0 は最大 0.10 に cap。`<=0` で全コンテキスト抽出 |
 | `moe_boost`                   |   `0.45` | |
@@ -198,7 +198,7 @@ GUI 既定起動時の代表値:
 
 - `chunk_sec` ≈ 0.30（20ms 境界）、`latency_mode` = `normal`
 - `overlap_sec` / `crossfade_sec` / `prebuffer_chunks` / `buffer_margin` = 下記 GUI 自動導出
-- `sola_search_ms` = 15.0、`use_sola` = true
+- `sola_search_ms` = 10.0、`use_sola` = true
 - `hubert_context_sec` = 1.0、`f0_context_sec` = 0.32
 - `f0_method` / `noise_scale` / denoise / postprocess は GUI・config 準拠
 - `decoder_overlap_frames` = 5（Aggressive では実行時に 2 扱い）
@@ -213,7 +213,7 @@ GUI 既定起動時の代表値:
 
 - `overlap_sec` = chunk の 100%（60–300ms、20ms 刻み）
 - `crossfade_sec` = chunk の 10%（10–20ms、10ms 刻み）両モード共通
-- `sola_search_ms` = 15.0 固定
+- `sola_search_ms` = 10.0 固定
 - `use_sola` = true
 - Normal: `prebuffer_chunks` = 1、`buffer_margin` = 0.25
 - Aggressive: `prebuffer_chunks` = 2、`buffer_margin` = 0.1
@@ -319,6 +319,7 @@ uv run python tests/integration/test_infer_streaming.py
 uv run python tests/integration/test_moe_f0_processing.py
 uv run python tests/integration/test_moe_clarity_scoring.py
 uv run python tests/crossfade/test_sola_compensation.py
+uv run python tests/integration/test_decoder_overlap.py
 uv run python tests/models/test_inference.py
 uv run python tests/models/test_rmvpe.py
 uv run python tests/models/test_cumulative_context.py

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import math
 from typing import Callable, Optional
 
 import customtkinter as ctk
+
+from rcwx.pipeline.realtime_config import DEFAULT_DECODER_OVERLAP_FRAMES, sola_margin_ms
 
 
 def _minimum_chunk_ms(f0_method: str, latency_mode: str = "normal") -> int:
@@ -44,10 +45,16 @@ def _auto_params(chunk_sec: float, latency_mode: str = "normal") -> dict:
     crossfade_ms = round(crossfade_ms / 10) * 10
     crossfade_ms = max(10, crossfade_ms)
 
-    # SOLA search window: must cover one period of the lowest expected
-    # output F0 so the splice can phase-align (70Hz -> 14.3ms, + margin).
-    # Doesn't affect latency; larger windows only add sola_extra compute.
-    sola_search_ms = 15.0
+    # SOLA search window.  The search range is part of the synthesis margin
+    # held back before the output boundary, so it is DIRECTLY end-to-end
+    # latency (see _compute_sola_extra_model): the margin is rounded up to a
+    # 10ms model frame, and crossfade+search <= 20ms keeps it one frame
+    # smaller than the 15ms window did (Aggressive 50ms -> 40ms).
+    # 10ms covers one period down to 100Hz; below that the splice may land
+    # off-phase, but _find_best_offset's minimum-shift selection already
+    # pins the offset near 0 on sustained tones, so the practical cost is
+    # small compared to the 10ms saved.
+    sola_search_ms = 10.0
 
     return {
         "overlap_sec": overlap_ms / 1000,
@@ -293,7 +300,7 @@ class LatencySettingsFrame(ctk.CTkFrame):
         - Input/output hop: one chunk period
         - Inference: nominal XPU processing estimate
         - Output buffer: policy's persistent floor target
-        - SOLA hold-back: crossfade_sec
+        - SOLA margin: crossfade + search + decoder overlap (both modes)
         """
         auto = _auto_params(self.chunk_sec, self.latency_mode)
         if self.latency_mode == "aggressive":
@@ -302,10 +309,16 @@ class LatencySettingsFrame(ctk.CTkFrame):
         else:
             inference_est = 35
             buffer_est = self.chunk_sec * 250
-        sola_est = auto["crossfade_sec"] * 1000
-        if self.latency_mode == "aggressive":
-            # Aggressive retains crossfade+search, rounded to a 10ms model frame.
-            sola_est = math.ceil((sola_est + auto["sola_search_ms"]) / 10) * 10
+        # Ask the runtime formula rather than re-deriving it here — the
+        # decoder overlap is part of the margin in BOTH modes (Normal's 5
+        # frames alone are 50ms), and an estimate that omits it understated
+        # Normal by 60ms.
+        sola_est = sola_margin_ms(
+            auto["crossfade_sec"],
+            auto["sola_search_ms"],
+            self.latency_mode,
+            DEFAULT_DECODER_OVERLAP_FRAMES,
+        )
         total_est = self.chunk_sec * 1000 + inference_est + buffer_est + sola_est
 
         self.estimate_label.configure(text=f"推定レイテンシ: ~{int(total_est)}ms")

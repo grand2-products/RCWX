@@ -43,6 +43,8 @@ from rcwx.pipeline.realtime_config import (
     LATENCY_MODES,
     RealtimeConfig,
     RealtimeStats,
+    _compute_sola_extra_model,
+    _effective_decoder_overlap_frames,
 )
 from rcwx.win_gpu_priority import boost_gpu_scheduling_priority
 
@@ -57,45 +59,6 @@ __all__ = [
     "RealtimeStats",
     "RealtimeVoiceChangerUnified",
 ]
-
-
-def _compute_sola_extra_model(
-    model_sample_rate: int,
-    output_sample_rate: int,
-    crossfade_samples_out: int,
-    search_samples_out: int,
-    decoder_overlap_frames: int,
-) -> int:
-    """Return the minimum aligned synthesis margin required by fixed-length SOLA.
-
-    At the maximum search offset, SOLA needs ``target + search + crossfade``
-    samples. The previous formula added the search window twice even though
-    the hold-back is taken immediately after the fixed output boundary.
-    """
-    zc_model = model_sample_rate // 100
-    required_out = crossfade_samples_out + search_samples_out
-    required_model = (
-        required_out * model_sample_rate + output_sample_rate - 1
-    ) // output_sample_rate
-    required_model += int(decoder_overlap_frames) * zc_model
-    return (required_model + zc_model - 1) // zc_model * zc_model
-
-
-def _effective_decoder_overlap_frames(
-    latency_mode: str,
-    configured_frames: int,
-) -> int:
-    """Decoder warmup frames for the streaming synthesis boundary.
-
-    Aggressive uses a reduced overlap (2 frames = 20ms) to keep the NSF
-    generator's convolutional receptive field near steady state at each
-    chunk boundary.  This prevents sustained-tone modulation artifacts
-    that were audible with overlap=0.  The cost is ~30% extra synthesis
-    compute, affordable under Graph replay (~11ms inference).
-    """
-    if latency_mode == "aggressive":
-        return 2
-    return max(0, int(configured_frames))
 
 
 # GPU/driver-level failure signatures (Intel level_zero / CUDA).  Once the
@@ -239,34 +202,9 @@ class RealtimeVoiceChangerUnified:
         )
         self._postprocessor = Postprocessor(self._runtime_output_sample_rate, pp_cfg)
 
-        # SOLA state
-        crossfade_samples_out = int(self._runtime_output_sample_rate * self.config.crossfade_sec)
-        search_samples_out = int(
-            self._runtime_output_sample_rate * self.config.sola_search_ms / 1000
-        )
-        self._sola_state = SolaState(
-            crossfade_samples=crossfade_samples_out,
-            search_samples=search_samples_out,
-        )
-
-        # SOLA extra: produce additional output samples (at model_sr) so
-        # SOLA has a full crossfade+search region that overlaps with the
-        # previous chunk's tail.  Worst-case SOLA needs cf+search+target_len
-        # from the audio, and we produce hop+sola_extra. Decoder overlap is
-        # added separately to keep Conv/SineGen warm at the splice boundary.
-        # Round up to model's zc boundary (= sample_rate // 100) so that
-        # trim_left in infer_streaming is always a multiple of
-        # samples_per_frame, eliminating sub-frame residual trim.
-        self._sola_extra_model = _compute_sola_extra_model(
-            self.pipeline.sample_rate,
-            self._runtime_output_sample_rate,
-            crossfade_samples_out,
-            search_samples_out,
-            _effective_decoder_overlap_frames(
-                self.config.latency_mode,
-                self.config.decoder_overlap_frames,
-            ),
-        )
+        # SOLA state + the synthesis margin its windows require
+        self._sola_state = SolaState()
+        self._rebuild_sola()
 
         # Output buffer: 4x chunk capacity (physical ring size)
         chunk_output_samples = int(self._runtime_output_sample_rate * self.config.chunk_sec)
@@ -534,15 +472,43 @@ class RealtimeVoiceChangerUnified:
             self._hop_samples_16k * self._runtime_output_sample_rate / 16000
         )
 
-        # SOLA extra samples
+        self._rebuild_sola()
+
+        # Hop change invalidates the drift-control level window
+        self._floor.reset()
+
+    def _rebuild_sola(self) -> None:
+        """Resize the SOLA windows and the synthesis margin they require.
+
+        Both must move together: ``_sola_extra_model`` is how much extra
+        audio ``infer_streaming`` produces ahead of the output boundary, and
+        SOLA consumes ``offset + crossfade`` of it per chunk.  Leaving the
+        margin behind when the windows grow starves the fixed-length splice,
+        which silently falls back to a variable-length output and drifts.
+        """
         crossfade_samples_out = int(self._runtime_output_sample_rate * self.config.crossfade_sec)
         search_samples_out = int(
             self._runtime_output_sample_rate * self.config.sola_search_ms / 1000
         )
-        self._sola_state.crossfade_samples = crossfade_samples_out
-        self._sola_state.search_samples = search_samples_out
-        self._sola_state._hann_fade_in = None
-        self._sola_state._hann_fade_out = None
+        self._sola_state.resize(crossfade_samples_out, search_samples_out)
+
+        # Only a splice that actually runs earns a margin.  sola_crossfade is
+        # skipped entirely when use_sola is off, and passes the audio straight
+        # through when the crossfade is zero-length -- either way nothing
+        # consumes the extra samples, so every chunk would emit hop+margin and
+        # the ring would grow until drift control hard-skips it back out.
+        if not self.config.use_sola or crossfade_samples_out <= 0:
+            self._sola_extra_model = 0
+            return
+
+        # SOLA extra: produce additional output samples (at model_sr) so
+        # SOLA has a full crossfade+search region that overlaps with the
+        # previous chunk's tail.  Worst-case SOLA needs cf+search+target_len
+        # from the audio, and we produce hop+sola_extra. Decoder overlap is
+        # added separately to keep Conv/SineGen warm at the splice boundary.
+        # Round up to model's zc boundary (= sample_rate // 100) so that
+        # trim_left in infer_streaming is always a multiple of
+        # samples_per_frame, eliminating sub-frame residual trim.
         self._sola_extra_model = _compute_sola_extra_model(
             self.pipeline.sample_rate,
             self._runtime_output_sample_rate,
@@ -553,9 +519,6 @@ class RealtimeVoiceChangerUnified:
                 self.config.decoder_overlap_frames,
             ),
         )
-
-        # Hop change invalidates the drift-control level window
-        self._floor.reset()
 
     def _apply_runtime_sample_rates(self, mic_rate: int, output_rate: int) -> None:
         """Apply actual stream sample rates and rebuild dependent state."""
@@ -929,6 +892,15 @@ class RealtimeVoiceChangerUnified:
         self._sync_required_prebuffer()
 
     def set_latency_mode(self, mode: str) -> None:
+        """Switch the deadline policy.  Callers must restart to apply it fully.
+
+        The mode also selects the decoder overlap, so it changes the SOLA
+        margin and with it the synthesizer's fixed output shape — which a
+        running session cannot swap under its captured graphs.  Rebuilding
+        here would be a half-measure; ``start()`` recomputes the geometry via
+        ``_recalculate_sizes``, and realtime_controller restarts on every mode
+        change.  This setter stays a pure policy switch.
+        """
         self.config.latency_mode = mode if mode in LATENCY_MODES else "normal"
         minimum = 2
         if self.config.latency_mode in DEADLINE_MODES and self._prebuffer_chunks < minimum:
@@ -946,17 +918,16 @@ class RealtimeVoiceChangerUnified:
 
     def set_crossfade(self, crossfade_sec: float) -> None:
         self.config.crossfade_sec = max(0.0, crossfade_sec)
-        # Rebuild SOLA state with new crossfade length
-        crossfade_samples_out = int(self._runtime_output_sample_rate * self.config.crossfade_sec)
-        search_samples_out = int(
-            self._runtime_output_sample_rate * self.config.sola_search_ms / 1000
-        )
-        self._sola_state = SolaState(
-            crossfade_samples=crossfade_samples_out,
-            search_samples=search_samples_out,
-        )
+        self._rebuild_sola()
 
     def set_sola(self, enabled: bool) -> None:
+        """Toggle the SOLA splice.  Callers must restart to apply it.
+
+        Whether SOLA runs decides whether the synthesis margin is produced at
+        all, so it sets the synthesizer's fixed output shape -- not something
+        a running session can swap under its captured graphs.  ``start()``
+        recomputes it via ``_recalculate_sizes``.
+        """
         self.config.use_sola = enabled
 
     def set_moe_boost(self, strength: float) -> None:

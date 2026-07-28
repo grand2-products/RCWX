@@ -16,6 +16,80 @@ logger = logging.getLogger(__name__)
 LATENCY_MODES = {"normal", "aggressive"}
 DEADLINE_MODES = {"aggressive"}
 
+# Decoder warmup frames at the streaming synthesis boundary (1 frame = 10ms).
+# Named so callers that need the default without a config instance -- the GUI
+# latency estimate -- read it from here rather than off the dataclass, which
+# would stop working the moment the field grew a default_factory.
+DEFAULT_DECODER_OVERLAP_FRAMES = 5
+
+
+def _compute_sola_extra_model(
+    model_sample_rate: int,
+    output_sample_rate: int,
+    crossfade_samples_out: int,
+    search_samples_out: int,
+    decoder_overlap_frames: int,
+) -> int:
+    """Return the minimum aligned synthesis margin required by fixed-length SOLA.
+
+    At the maximum search offset, SOLA needs ``target + search + crossfade``
+    samples. The previous formula added the search window twice even though
+    the hold-back is taken immediately after the fixed output boundary.
+
+    The margin sits before the output boundary, so it is end-to-end latency:
+    keep it in sync with whatever the estimate shown in the GUI reports (see
+    :func:`sola_margin_ms`).
+    """
+    zc_model = model_sample_rate // 100
+    required_out = crossfade_samples_out + search_samples_out
+    required_model = (
+        required_out * model_sample_rate + output_sample_rate - 1
+    ) // output_sample_rate
+    required_model += int(decoder_overlap_frames) * zc_model
+    return (required_model + zc_model - 1) // zc_model * zc_model
+
+
+def _effective_decoder_overlap_frames(
+    latency_mode: str,
+    configured_frames: int,
+) -> int:
+    """Decoder warmup frames for the streaming synthesis boundary.
+
+    Aggressive uses a reduced overlap (2 frames = 20ms) to keep the NSF
+    generator's convolutional receptive field near steady state at each
+    chunk boundary.  This prevents sustained-tone modulation artifacts
+    that were audible with overlap=0.  The cost is ~30% extra synthesis
+    compute, affordable under Graph replay (~11ms inference).
+    """
+    if latency_mode == "aggressive":
+        return 2
+    return max(0, int(configured_frames))
+
+
+def sola_margin_ms(
+    crossfade_sec: float,
+    sola_search_ms: float,
+    latency_mode: str,
+    decoder_overlap_frames: int,
+) -> float:
+    """Return the SOLA synthesis margin in ms, as the runtime will compute it.
+
+    The margin is rate-independent: the zero-crossing grid is
+    ``model_sample_rate // 100`` (exactly 10ms at every supported rate) and
+    the output-rate sample counts cancel in the conversion, so nominal rates
+    give the same answer as the live ones.  This lets the GUI show the real
+    figure before a model is loaded, without duplicating the formula.
+    """
+    nominal = 48000
+    extra = _compute_sola_extra_model(
+        nominal,
+        nominal,
+        int(nominal * crossfade_sec),
+        int(nominal * sola_search_ms / 1000),
+        _effective_decoder_overlap_frames(latency_mode, decoder_overlap_frames),
+    )
+    return extra * 1000.0 / nominal
+
 
 @dataclass
 class RealtimeStats:
@@ -106,9 +180,10 @@ class RealtimeConfig:
     latency_mode: str = "normal"
     overlap_sec: float = 0.10  # audio-level overlap for HuBERT continuity
     crossfade_sec: float = 0.02
-    # SOLA search window (ms): one period of the lowest expected output F0
-    # (70Hz -> 14.3ms) + margin, so the splice can always phase-align.
-    sola_search_ms: float = 15.0
+    # SOLA search window (ms).  Part of the synthesis margin held back before
+    # the output boundary, so it is directly end-to-end latency.  Keep
+    # crossfade + search <= 20ms to stay inside one 10ms model frame.
+    sola_search_ms: float = 10.0
     prebuffer_chunks: int = 1
     buffer_margin: float = 0.25
 
@@ -169,7 +244,7 @@ class RealtimeConfig:
     asio_buffer_size: int = 0
 
     # Decoder overlap for cross-chunk continuity (feature frames, 1 frame = 10ms)
-    decoder_overlap_frames: int = 5
+    decoder_overlap_frames: int = DEFAULT_DECODER_OVERLAP_FRAMES
 
     # Post-processing (treble boost + limiter)
     postprocess_enabled: bool = True

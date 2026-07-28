@@ -44,6 +44,23 @@ class SolaState:
     last_in_len: int = 0
     last_out_len: int = 0
 
+    def resize(self, crossfade_samples: int, search_samples: int) -> None:
+        """Apply new window sizes, dropping state the old sizes invalidated.
+
+        The hold-back buffer is exactly ``crossfade_samples`` long, so one
+        held under the previous window would broadcast-mismatch the new Hann
+        curves on the next splice (a ValueError raised on the inference
+        thread).  Drop it and let the next chunk restart the crossfade chain
+        — a single uncrossfaded boundary, only on an explicit settings
+        change.  The search window carries no state, so it just updates.
+        """
+        if crossfade_samples != self.crossfade_samples:
+            self.buffer = None
+            self._hann_fade_in = None
+            self._hann_fade_out = None
+            self.crossfade_samples = crossfade_samples
+        self.search_samples = search_samples
+
     def _ensure_window(self) -> None:
         """Create Hann crossfade windows if not yet created."""
         if self._hann_fade_in is None and self.crossfade_samples > 0:
