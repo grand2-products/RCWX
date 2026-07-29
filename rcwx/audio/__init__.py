@@ -6,15 +6,19 @@ including numpy-only modules such as ``rcwx.audio.sola``.  Nothing in the
 tree imports these names from the package itself; they stay exported for
 outside callers.
 
-``denoise`` and ``resample`` name both a submodule and a function.  Binding
-either function eagerly reintroduces the import being avoided (torch for one,
-scipy for the other), so both stay lazy: they resolve to the FUNCTION as
-before, except when their submodule was imported before the package attribute
-is first touched, where the module wins.  Nothing in the tree relies on these
-re-exports; import from the submodule to be unambiguous.
+``denoise`` and ``resample`` name both a submodule and a function, and the
+eager version bound the function last, so that is what callers see.  A
+module-level ``__getattr__`` cannot preserve that: the import system setattrs
+each submodule onto its parent, and ``__getattr__`` only runs for names that
+are ABSENT.  Loading ``rcwx.audio.denoise`` -- which any of the other lazy
+names does, and which ``import rcwx.pipeline.inference`` does -- would then
+shadow the function for the rest of the process.  ``__getattribute__`` runs
+ahead of the instance dict, so those two names resolve there instead.
 """
 
+import sys
 from importlib import import_module
+from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -55,18 +59,42 @@ _LAZY = {
 }
 
 
+# Names a submodule of this package would otherwise shadow.
+_SHADOWED = {name: _LAZY[name] for name in ("denoise", "resample")}
+
+
 def __getattr__(name: str) -> Any:
     module_path = _LAZY.get(name)
     if module_path is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     value = getattr(import_module(module_path), name)
-    # Bind it here, which matters beyond caching: ``denoise`` and ``resample``
-    # name both a submodule and a function, and importing the submodule just
-    # set this attribute to the module.  The eager version bound the function
-    # last and callers rely on that, so restore it.
-    globals()[name] = value
+    globals()[name] = value  # cache; __getattr__ only fires for absent names
     return value
 
 
+# Machinery for the lazy hooks; an implementation detail, not part of the
+# package surface.
+_INTERNAL = frozenset(
+    {"sys", "import_module", "ModuleType", "TYPE_CHECKING", "Any", "_LAZY", "_SHADOWED"}
+)
+
+
 def __dir__() -> list[str]:
-    return sorted(__all__)
+    # Keep the real module attributes -- __file__, __path__, __spec__, and the
+    # submodules bound by the import system.  Returning only __all__ made
+    # ``'__path__' in dir(pkg)`` false, so package-detection idioms and REPL
+    # completion both broke.
+    return sorted((set(globals()) | set(__all__)) - _INTERNAL)
+
+
+class _FunctionsShadowSubmodules(ModuleType):
+    """Resolve the submodule-shadowed names to their functions."""
+
+    def __getattribute__(self, name: str) -> Any:
+        module_path = _SHADOWED.get(name)
+        if module_path is not None:
+            return getattr(import_module(module_path), name)
+        return super().__getattribute__(name)
+
+
+sys.modules[__name__].__class__ = _FunctionsShadowSubmodules

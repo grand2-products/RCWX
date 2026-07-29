@@ -32,5 +32,11 @@ def __getattr__(name: str) -> Any:
     return value
 
 
+# Machinery for the lazy hook; an implementation detail.
+_INTERNAL = frozenset({"import_module", "TYPE_CHECKING", "Any", "_LAZY"})
+
+
 def __dir__() -> list[str]:
-    return sorted(__all__)
+    # Keep the real module attributes (__file__, __path__, __spec__, and the
+    # submodules the import system binds here) alongside the lazy names.
+    return sorted((set(globals()) | set(__all__)) - _INTERNAL)
