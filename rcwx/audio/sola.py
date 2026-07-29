@@ -44,22 +44,28 @@ class SolaState:
     last_in_len: int = 0
     last_out_len: int = 0
 
-    def resize(self, crossfade_samples: int, search_samples: int) -> None:
-        """Apply new window sizes, dropping state the old sizes invalidated.
+    def resized(self, crossfade_samples: int, search_samples: int) -> "SolaState":
+        """Return a NEW state with these window sizes.
+
+        Returns a fresh object rather than mutating in place so the caller can
+        publish it with a single rebind: the inference thread reads this state
+        without a lock, and a half-updated one would hand it a hold-back and
+        Hann curves of different lengths.
 
         The hold-back buffer is exactly ``crossfade_samples`` long, so one
-        held under the previous window would broadcast-mismatch the new Hann
-        curves on the next splice (a ValueError raised on the inference
-        thread).  Drop it and let the next chunk restart the crossfade chain
-        — a single uncrossfaded boundary, only on an explicit settings
-        change.  The search window carries no state, so it just updates.
+        held under the previous window cannot be carried across a crossfade
+        change -- it is dropped and the next chunk restarts the crossfade
+        chain (a single uncrossfaded boundary, only on an explicit settings
+        change).  The search window carries no state, so the hold-back
+        survives a search-only change.
         """
-        if crossfade_samples != self.crossfade_samples:
-            self.buffer = None
-            self._hann_fade_in = None
-            self._hann_fade_out = None
-            self.crossfade_samples = crossfade_samples
-        self.search_samples = search_samples
+        state = SolaState(
+            crossfade_samples=crossfade_samples,
+            search_samples=search_samples,
+        )
+        if crossfade_samples == self.crossfade_samples:
+            state.buffer = self.buffer
+        return state
 
     def _ensure_window(self) -> None:
         """Create Hann crossfade windows if not yet created."""

@@ -490,7 +490,10 @@ class RealtimeVoiceChangerUnified:
         search_samples_out = int(
             self._runtime_output_sample_rate * self.config.sola_search_ms / 1000
         )
-        self._sola_state.resize(crossfade_samples_out, search_samples_out)
+        # Single rebind: the inference thread reads this without a lock.
+        self._sola_state = self._sola_state.resized(
+            crossfade_samples_out, search_samples_out
+        )
 
         # Only a splice that actually runs earns a margin.  sola_crossfade is
         # skipped entirely when use_sola is off, and passes the audio straight
@@ -917,6 +920,16 @@ class RealtimeVoiceChangerUnified:
         self._overlap_samples_16k = self._align_to_hop(int(self.config.overlap_sec * 16000), 320)
 
     def set_crossfade(self, crossfade_sec: float) -> None:
+        """Set the crossfade length.  Callers must restart to apply it.
+
+        Like ``set_sola`` and ``set_latency_mode``, this moves the SOLA margin
+        and with it the synthesizer's fixed output shape.  The rebuild here
+        keeps the windows and the margin consistent for the next ``start()``;
+        it is not safe to rely on mid-session.  realtime_controller only
+        reaches this without a restart when ``chunk_sec`` is unchanged, and
+        the crossfade is derived from ``chunk_sec``, so the value is the same
+        and the rebuild is a no-op.
+        """
         self.config.crossfade_sec = max(0.0, crossfade_sec)
         self._rebuild_sola()
 
