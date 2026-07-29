@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 
-from rcwx.audio.sola import SolaState
+from rcwx.audio.sola import SolaState, sola_crossfade
 from rcwx.gui.widgets.latency_settings import _auto_params
 from rcwx.pipeline.realtime_config import DEFAULT_DECODER_OVERLAP_FRAMES, sola_margin_ms
 from rcwx.pipeline.realtime_unified import (
@@ -71,6 +71,13 @@ def test_sola_extra_aligned_at_every_model_rate() -> None:
 
     trim_left in infer_streaming assumes a whole number of frames; a
     sub-frame residue shifts the output boundary.
+
+    The rates the GUI actually produces all divide evenly, so the round-up is
+    a no-op there and asserting it on those alone proves nothing -- an earlier
+    version of this test passed with BOTH the round-up and the decoder-overlap
+    term deleted.  The 15ms crossfade case below does not divide evenly
+    (32000/44100 puts the requirement at 799.6 samples), so it pins all three
+    terms to hand-computed values.
     """
     for model_sr in (32000, 40000, 48000):
         for output_sr in (44100, 48000):
@@ -86,13 +93,56 @@ def test_sola_extra_aligned_at_every_model_rate() -> None:
             assert extra * output_sr >= required_out * model_sr, (
                 f"{model_sr}->{output_sr}: margin {extra} below required {required_out}"
             )
-    print("PASS: margin aligned and sufficient at 32k/40k/48k x 44.1k/48k")
+
+    # model 32000 -> out 44100, crossfade 15ms (661) + search 10ms (441):
+    #   required_model = ceil(1102 * 32000/44100) = ceil(799.63) = 800
+    #   + 5 frames * 320                          = 2400
+    #   rounded up to the 320 grid (7.5 -> 8)     = 2560
+    # Deleting the round-up gives 2400; deleting the overlap term gives 960.
+    cf_15ms = int(44100 * 0.015)
+    search_10ms = int(44100 * 10.0 / 1000)
+    assert _compute_sola_extra_model(32000, 44100, cf_15ms, search_10ms, 5) == 2560
+    assert _compute_sola_extra_model(32000, 44100, cf_15ms, search_10ms, 0) == 960
+    print("PASS: margin aligned at every rate, round-up and overlap pinned")
 
 
 def test_decoder_overlap_default_is_5() -> None:
     cfg = RealtimeConfig()
     assert cfg.decoder_overlap_frames == 5, f"Expected 5, got {cfg.decoder_overlap_frames}"
     print("PASS: default decoder_overlap_frames == 5")
+
+
+def test_gui_derived_latency_values_are_pinned() -> None:
+    """Pin the values _auto_params hands the runtime.
+
+    Everything else here only checks that the GUI and the runtime agree with
+    each other, so both could drift together unnoticed -- mutating
+    ``sola_search_ms`` to 20.0 or the crossfade floor to 30ms killed no test.
+    These are the numbers the latency budget is actually built from.
+    """
+    # crossfade + search <= 20ms is what keeps the margin one 10ms model
+    # frame smaller; raising either silently costs 10ms of latency.
+    for mode in ("aggressive", "normal"):
+        for chunk_sec in (0.02, 0.04, 0.10, 0.16, 0.30, 0.60):
+            auto = _auto_params(chunk_sec, mode)
+            assert auto["sola_search_ms"] == 10.0, (
+                f"{mode} {chunk_sec}: search {auto['sola_search_ms']} != 10.0"
+            )
+            assert auto["use_sola"] is True
+
+    # crossfade is 10% of the chunk on a 10ms grid, floored at 10 and capped
+    # at 20; the floor is what holds cf+search at 20ms for small chunks.
+    expected_crossfade_ms = {0.02: 10, 0.04: 10, 0.10: 10, 0.16: 20, 0.30: 20, 0.60: 20}
+    for chunk_sec, cf_ms in expected_crossfade_ms.items():
+        auto = _auto_params(chunk_sec, "normal")
+        assert round(auto["crossfade_sec"] * 1000) == cf_ms, (
+            f"chunk {chunk_sec}: crossfade {auto['crossfade_sec'] * 1000}ms != {cf_ms}ms"
+        )
+
+    # The resulting margins, which are what the user pays in latency.
+    assert sola_margin_ms(0.010, 10.0, "aggressive", DEFAULT_DECODER_OVERLAP_FRAMES) == 40.0
+    assert sola_margin_ms(0.020, 10.0, "normal", DEFAULT_DECODER_OVERLAP_FRAMES) == 80.0
+    print("PASS: GUI-derived search/crossfade and resulting margins pinned")
 
 
 def test_gui_estimate_matches_runtime_margin() -> None:
@@ -134,26 +184,55 @@ def test_gui_estimate_matches_runtime_margin() -> None:
     print("PASS: GUI estimate == runtime margin at every rate")
 
 
-def test_gui_margin_fits_the_hop() -> None:
-    """SOLA needs offset+crossfade of margin per chunk; the rest is headroom.
+def test_every_gui_preset_emits_exactly_one_hop() -> None:
+    """Run each GUI preset through the real splice and check the length.
 
-    If this ever fails, sola_crossfade silently abandons its fixed-length
-    branch and the output length drifts away from one hop.
+    Asserting ``margin >= crossfade + search`` instead was worthless: that
+    inequality is true for any non-negative decoder overlap and any ceiling,
+    so it held even with the round-up and the overlap term both deleted.
+    Feeding real chunks through ``sola_crossfade`` is the property that
+    actually matters -- when the margin is starved the fixed-length branch is
+    silently abandoned and the emitted length drifts away from one hop.
     """
-    output_sr = 44100
-    for mode, chunk_sec in [("aggressive", 0.02), ("normal", 0.04), ("normal", 0.30)]:
+    output_sr, model_sr = 44100, 48000
+    rng = np.random.default_rng(0)
+    for mode, chunk_sec in [
+        ("aggressive", 0.02),
+        ("aggressive", 0.10),
+        ("normal", 0.04),
+        ("normal", 0.30),
+    ]:
         auto = _auto_params(chunk_sec, mode)
         cf = int(output_sr * auto["crossfade_sec"])
         search = int(output_sr * auto["sola_search_ms"] / 1000)
-        margin_out = sola_margin_ms(
-            auto["crossfade_sec"], auto["sola_search_ms"], mode,
-            DEFAULT_DECODER_OVERLAP_FRAMES,
-        ) * output_sr / 1000.0
-        assert margin_out >= search + cf, (
-            f"{mode} {chunk_sec * 1000:.0f}ms: margin {margin_out} < "
-            f"worst-case offset+crossfade {search + cf}"
+        hop_out = int(round(chunk_sec * output_sr))
+        margin_model = _compute_sola_extra_model(
+            model_sr, output_sr, cf, search,
+            _effective_decoder_overlap_frames(mode, DEFAULT_DECODER_OVERLAP_FRAMES),
         )
-    print("PASS: margin covers worst-case offset+crossfade in every preset")
+        margin_out = int(round(margin_model * output_sr / model_sr))
+
+        state = SolaState(crossfade_samples=cf, search_samples=search)
+        n = 40
+        signal = (
+            np.sin(2 * np.pi * 110 * np.arange((n + 4) * hop_out) / output_sr)
+            + 0.3 * rng.standard_normal((n + 4) * hop_out)
+        ).astype(np.float32)
+
+        emitted = 0
+        first = 1 + -(-margin_out // hop_out)  # first chunk with enough history
+        for i in range(first, n):
+            end = i * hop_out
+            out = sola_crossfade(
+                signal[end - hop_out - margin_out:end], state, target_len=hop_out
+            )
+            assert len(out) == hop_out, (
+                f"{mode} {chunk_sec * 1000:.0f}ms chunk {i}: emitted {len(out)}, "
+                f"expected one hop ({hop_out}) -- fixed-length branch abandoned"
+            )
+            emitted += len(out)
+        assert emitted == (n - first) * hop_out
+    print("PASS: every GUI preset emits exactly one hop through the real splice")
 
 
 def _rebuilt(**config_kwargs) -> RealtimeVoiceChangerUnified:
@@ -189,28 +268,34 @@ def test_no_margin_when_the_splice_never_runs() -> None:
     print("PASS: margin is produced only when the splice consumes it")
 
 
-def test_sola_resize_drops_stale_holdback() -> None:
-    """Changing the crossfade length must drop the old hold-back.
+def test_resized_returns_a_new_state_without_the_stale_holdback() -> None:
+    """Resizing must publish a NEW state and drop a hold-back the change invalidated.
 
     The buffer is exactly crossfade_samples long; keeping one sized for the
     previous window broadcast-mismatches the new Hann curves and raises
-    ValueError on the inference thread.
+    ValueError on the inference thread.  Returning a new object matters too:
+    the inference thread reads this state without a lock, so it must never
+    observe a half-updated one.
     """
-    state = SolaState(crossfade_samples=441, search_samples=441)
-    state.buffer = np.zeros(441, dtype=np.float32)
-    state._ensure_window()
+    original = SolaState(crossfade_samples=441, search_samples=441)
+    original.buffer = np.zeros(441, dtype=np.float32)
+    original._ensure_window()
 
-    state.resize(882, 441)
-    assert state.buffer is None, "stale hold-back survived a crossfade change"
-    assert state._hann_fade_in is None, "stale Hann window survived"
-    assert state.crossfade_samples == 882
+    changed = original.resized(882, 441)
+    assert changed is not original, "resized mutated in place instead of rebinding"
+    assert original.buffer is not None, "resized modified the state it was called on"
+    assert changed.buffer is None, "stale hold-back survived a crossfade change"
+    assert changed._hann_fade_in is None, "stale Hann window survived"
+    assert changed.crossfade_samples == 882
 
-    # Search-only changes carry no state, so the hold-back is preserved.
-    state.buffer = np.zeros(882, dtype=np.float32)
-    state.resize(882, 220)
-    assert state.buffer is not None, "hold-back dropped for a search-only change"
-    assert state.search_samples == 220
-    print("PASS: resize drops the hold-back only when the crossfade changes")
+    # Search-only changes carry no state, so the hold-back comes across.
+    held = np.zeros(882, dtype=np.float32)
+    changed.buffer = held
+    same_window = changed.resized(882, 220)
+    assert same_window is not changed
+    assert same_window.buffer is held, "hold-back dropped for a search-only change"
+    assert same_window.search_samples == 220
+    print("PASS: resized rebinds, and drops the hold-back only on a crossfade change")
 
 
 if __name__ == "__main__":
@@ -219,8 +304,9 @@ if __name__ == "__main__":
     test_decoder_overlap_increases_sola_extra()
     test_sola_extra_aligned_at_every_model_rate()
     test_decoder_overlap_default_is_5()
+    test_gui_derived_latency_values_are_pinned()
     test_gui_estimate_matches_runtime_margin()
-    test_gui_margin_fits_the_hop()
+    test_every_gui_preset_emits_exactly_one_hop()
     test_no_margin_when_the_splice_never_runs()
-    test_sola_resize_drops_stale_holdback()
+    test_resized_returns_a_new_state_without_the_stale_holdback()
     print("\nAll decoder overlap / SOLA margin tests passed.")
