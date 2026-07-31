@@ -61,9 +61,9 @@ def test_batch_vs_streaming():
     logger.info(f"Model sample rate: {model_sr}")
 
     # Load test audio
-    test_file = Path(__file__).parent.parent / "sample_data" / "sustained_voice.wav"
+    test_file = Path(__file__).resolve().parents[2] / "sample_data" / "sustained_voice.wav"
     if not test_file.exists():
-        test_file = Path(__file__).parent.parent / "sample_data" / "seki.wav"
+        test_file = Path(__file__).resolve().parents[2] / "sample_data" / "seki.wav"
     audio_16k = load_test_audio(str(test_file), 16000)
     logger.info(f"Test audio: {test_file.name}, {len(audio_16k)} samples ({len(audio_16k)/16000:.2f}s)")
 

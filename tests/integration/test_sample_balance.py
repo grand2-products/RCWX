@@ -23,19 +23,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from rcwx.audio.resample import StatefulResampler
 from rcwx.audio.sola import SolaState, sola_crossfade
-
-
-def _compute_sola_extra_model(
-    model_sr: int,
-    output_sr: int,
-    cf_out: int,
-    search_out: int,
-) -> int:
-    """Compute sola_extra_model with zc alignment (mirrors realtime_unified.py)."""
-    sola_extra_out = cf_out + search_out
-    zc_model = model_sr // 100
-    sola_extra_raw = int(sola_extra_out * model_sr / output_sr)
-    return (sola_extra_raw + zc_model - 1) // zc_model * zc_model
+from rcwx.pipeline.realtime_config import (
+    DEFAULT_DECODER_OVERLAP_FRAMES,
+    _compute_sola_extra_model,
+    _effective_decoder_overlap_frames,
+)
 
 
 def _simulate_pipeline(
@@ -46,16 +38,28 @@ def _simulate_pipeline(
     sola_search_ms: float,
     n_chunks: int,
     model_shortfall: int = 0,
+    latency_mode: str = "normal",
 ) -> list[int]:
     """Simulate n_chunks of the output pipeline.
 
     Returns per-chunk output lengths (each should be hop_out).
+
+    The margin comes from the production helper.  A local copy used to stand
+    in for it here, and had drifted: it omitted the decoder-overlap term and
+    truncated where the real one rounds up, so this simulation validated a
+    formula the product does not use.
     """
     hop_out = int(hop_16k * output_sr / 16000)
 
     cf_out = int(output_sr * crossfade_sec)
     search_out = int(output_sr * sola_search_ms / 1000)
-    sola_extra_model = _compute_sola_extra_model(model_sr, output_sr, cf_out, search_out)
+    sola_extra_model = _compute_sola_extra_model(
+        model_sr,
+        output_sr,
+        cf_out,
+        search_out,
+        _effective_decoder_overlap_frames(latency_mode, DEFAULT_DECODER_OVERLAP_FRAMES),
+    )
 
     new_samples_16k = hop_16k
     expected_model_out = int(new_samples_16k * model_sr / 16000) + sola_extra_model
@@ -223,7 +227,10 @@ def test_zero_drift_random_input() -> None:
         hop_out = int(hop_16k * output_sr / 16000)
         cf_out = int(output_sr * cf_sec)
         search_out = int(output_sr * search_ms / 1000)
-        sola_extra_model = _compute_sola_extra_model(model_sr, output_sr, cf_out, search_out)
+        sola_extra_model = _compute_sola_extra_model(
+            model_sr, output_sr, cf_out, search_out,
+            _effective_decoder_overlap_frames("normal", DEFAULT_DECODER_OVERLAP_FRAMES),
+        )
         expected_model_out = int(hop_16k * model_sr / 16000) + sola_extra_model
 
         resampler = StatefulResampler(model_sr, output_sr)
@@ -249,7 +256,10 @@ def test_long_session_5000_chunks() -> None:
     hop_out = int(hop_16k * output_sr / 16000)
     cf_out = int(output_sr * cf_sec)
     search_out = int(output_sr * search_ms / 1000)
-    sola_extra_model = _compute_sola_extra_model(model_sr, output_sr, cf_out, search_out)
+    sola_extra_model = _compute_sola_extra_model(
+            model_sr, output_sr, cf_out, search_out,
+            _effective_decoder_overlap_frames("normal", DEFAULT_DECODER_OVERLAP_FRAMES),
+        )
     expected_model_out = int(hop_16k * model_sr / 16000) + sola_extra_model
 
     resampler = StatefulResampler(model_sr, output_sr)

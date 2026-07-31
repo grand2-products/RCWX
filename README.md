@@ -268,9 +268,9 @@ MLの2段処理は計算量も増えます。GUI の `Aggressive` では deadlin
 |-----------|---------------|-------------|------|
 | `overlap_sec` | 0.20 | chunkの100%（60–300ms、20ms刻み） | HuBERT入力に付加する音声オーバーラップ長。20ms境界（HuBERT 320サンプルホップ）に丸められる |
 | `crossfade_sec` | 0.08 | chunkの10%（10–20ms、10ms刻み） | SOLAクロスフェード長。前チャンク末尾と次チャンク先頭をHann窓でブレンド |
-| `use_sola` | true | true固定 | SOLA（Synchronized Overlap-Add）の有効化 |
-| `sola_search_ms` | 15.0 | 15.0固定 | SOLA探索窓（ms）。最低出力F0 70Hzの1周期+マージン。レイテンシ表示には計上されるが探索幅自体は遅延を増やさない |
-| `prebuffer_chunks` | 1 | Normal=1 / Aggressive=3 | 出力開始前（および Aggressive のアンダーラン再アーム）に確保する hop 数 |
+| `use_sola` | true | true固定 | SOLA（Synchronized Overlap-Add）の有効化。false にすると SOLA 余白の生成も止まる（余白を消費する splice が走らないため） |
+| `sola_search_ms` | 10.0 | 10.0固定 | SOLA探索窓（ms）。100Hzの1周期。探索幅は出力境界前の合成マージンの一部なので**そのままE2E遅延**。`crossfade + search ≤ 20ms` に収めるとマージンが10msモデルフレーム1枚分縮む（Aggressive 50ms→40ms） |
+| `prebuffer_chunks` | 1 | Normal=1 / Aggressive=2 | 出力開始前（および Aggressive のアンダーラン再アーム）に確保する hop 数 |
 | `buffer_margin` | 0.25 | Normal=0.25 / Aggressive=0.1 | Normal の持続リング floor 判定に使用（threshold ≈ 0.5+margin hop） |
 
 **処理フロー**: `overlap_sec` の音声を入力に付加 → HuBERT+F0抽出 → 合成 → `crossfade_sec` 区間で前チャンクとSOLAブレンド（`sola_search_ms` 窓内で最適位置探索）

@@ -55,9 +55,9 @@ def test_sola_length_normalization():
     logger.info(f"Model sample rate: {model_sr}")
 
     # Load test audio
-    test_file = Path(__file__).parent.parent / "sample_data" / "sustained_voice.wav"
+    test_file = Path(__file__).resolve().parents[2] / "sample_data" / "sustained_voice.wav"
     if not test_file.exists():
-        test_file = Path(__file__).parent.parent / "sample_data" / "seki.wav"
+        test_file = Path(__file__).resolve().parents[2] / "sample_data" / "seki.wav"
     audio_16k = load_test_audio(str(test_file), 16000)
     audio_16k = audio_16k[:32000]  # 2 seconds
 
